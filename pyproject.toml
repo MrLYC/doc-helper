@@ -60,16 +60,14 @@ classifiers = [
 python = "^3.9.0"
 python-dotenv = "^1.1.1"
 tomli = { version = "^2.2.1", python = "<3.11" }
+weasyprint = "^66.0"
+pypdf2 = "^3.0.1"
+sentry-sdk = "^2.34.1"
+playwright = "^1.54.0"
 
 
 [tool.poetry.group.dev.dependencies]
 mypy = "^1.17.1"
-
-
-[[tool.poetry.source]]
-name = "tencent"
-url = "https://mirrors.cloud.tencent.com/pypi/simple"
-default = true
 
 
 [tool.poetry.group.linters]
@@ -89,6 +87,12 @@ pytest = "^8.4.1"
 pytest-cov = "^6.2.1"
 tox = "^4.28.4"
 tox-gh-actions = "^3.3.0"
+
+
+[[tool.poetry.source]]
+name = "tencent"
+url = "https://mirrors.cloud.tencent.com/pypi/simple"
+default = true
 
 
 [tool.pytest.ini_options]
