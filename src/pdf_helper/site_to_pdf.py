@@ -56,7 +56,7 @@ class TimeoutConfig:
     @property
     def element_check_interval(self) -> float:
         """元素检查间隔（秒）"""
-        return 1.0
+        return 5.0
     
     @property
     def fast_check_interval(self) -> float:
