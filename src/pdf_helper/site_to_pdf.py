@@ -3,12 +3,18 @@ import argparse
 from pathlib import Path
 from collections import deque
 import tempfile
+import shutil
 import time
 from urllib.parse import urlparse, urljoin
 import logging
 import urllib.parse
 from dataclasses import dataclass
 from typing import Tuple, Dict, Any, Optional, List
+import json
+import hashlib
+import signal
+import sys
+import os
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from PyPDF2 import PdfMerger, PdfReader
@@ -72,6 +78,147 @@ class TimeoutConfig:
     def min_pdf_size(self) -> int:
         """最小PDF文件大小（字节）"""
         return 5000
+
+@dataclass
+class ProgressState:
+    """进度状态管理"""
+    base_url: str
+    output_pdf: str
+    temp_dir: str
+    progress_file: str
+    visited_urls: set
+    failed_urls: list
+    processed_urls: list
+    pdf_files: list
+    queue: deque
+    enqueued: set
+    
+    def save_to_file(self):
+        """保存进度到文件"""
+        state_data = {
+            'base_url': self.base_url,
+            'output_pdf': self.output_pdf,
+            'temp_dir': self.temp_dir,
+            'visited_urls': list(self.visited_urls),
+            'failed_urls': self.failed_urls,
+            'processed_urls': self.processed_urls,
+            'pdf_files': [str(f) for f in self.pdf_files],
+            'queue': list(self.queue),
+            'enqueued': list(self.enqueued)
+        }
+        
+        with open(self.progress_file, 'w', encoding='utf-8') as f:
+            json.dump(state_data, f, ensure_ascii=False, indent=2)
+        logger.debug(f"进度已保存到: {self.progress_file}")
+    
+    @classmethod
+    def load_from_file(cls, progress_file: str):
+        """从文件加载进度"""
+        if not os.path.exists(progress_file):
+            return None
+        
+        try:
+            with open(progress_file, 'r', encoding='utf-8') as f:
+                state_data = json.load(f)
+            
+            # 验证临时PDF文件是否存在
+            valid_pdf_files = []
+            for pdf_file_str in state_data.get('pdf_files', []):
+                pdf_path = Path(pdf_file_str)
+                if pdf_path.exists():
+                    valid_pdf_files.append(pdf_path)
+                else:
+                    logger.warning(f"临时PDF文件不存在，已从进度中移除: {pdf_file_str}")
+            
+            progress = cls(
+                base_url=state_data.get('base_url', ''),
+                output_pdf=state_data.get('output_pdf', ''),
+                temp_dir=state_data.get('temp_dir', ''),
+                progress_file=progress_file,
+                visited_urls=set(state_data.get('visited_urls', [])),
+                failed_urls=state_data.get('failed_urls', []),
+                processed_urls=state_data.get('processed_urls', []),
+                pdf_files=valid_pdf_files,
+                queue=deque(state_data.get('queue', [])),
+                enqueued=set(state_data.get('enqueued', []))
+            )
+            
+            logger.info(f"从进度文件恢复状态: 已处理 {len(progress.processed_urls)} 个URL，"
+                       f"队列中还有 {len(progress.queue)} 个URL")
+            
+            return progress
+            
+        except Exception as e:
+            logger.error(f"加载进度文件失败: {e}")
+            return None
+
+def url_to_filename(url: str) -> str:
+    """将URL转换为安全的文件名"""
+    # 使用URL的哈希值作为文件名的一部分，确保唯一性
+    url_hash = hashlib.md5(url.encode('utf-8')).hexdigest()[:8]
+    
+    # 清理URL用作文件名
+    safe_name = re.sub(r'[^\w\-_\.]', '_', url.replace('https://', '').replace('http://', ''))
+    safe_name = safe_name[:50]  # 限制长度
+    
+    return f"{safe_name}_{url_hash}.pdf"
+
+def setup_signal_handlers(progress_state: ProgressState):
+    """设置信号处理器，用于优雅退出"""
+    def signal_handler(signum, frame):
+        logger.info(f"收到信号 {signum}，正在保存进度...")
+        progress_state.save_to_file()
+        logger.info("进度已保存，程序退出")
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
+    signal.signal(signal.SIGTERM, signal_handler)  # 终止信号
+
+def create_progress_file_path(output_pdf: str, base_url: str) -> str:
+    """创建进度文件路径"""
+    output_path = Path(output_pdf)
+    base_name = output_path.stem
+    
+    # 使用base_url的哈希值确保唯一性
+    url_hash = hashlib.md5(base_url.encode('utf-8')).hexdigest()[:8]
+    
+    progress_file = output_path.parent / f".{base_name}_{url_hash}.progress"
+    return str(progress_file)
+
+def cleanup_temp_files(temp_dir: str, progress_file: str = None):
+    """清理临时文件"""
+    cleaned_count = 0
+    
+    # 清理临时PDF文件
+    if temp_dir and os.path.exists(temp_dir):
+        temp_path = Path(temp_dir)
+        for pdf_file in temp_path.glob("*.pdf"):
+            try:
+                pdf_file.unlink()
+                cleaned_count += 1
+                logger.debug(f"删除临时PDF: {pdf_file}")
+            except Exception as e:
+                logger.warning(f"删除临时PDF失败 {pdf_file}: {e}")
+        
+        # 尝试删除临时目录
+        try:
+            temp_path.rmdir()
+            logger.debug(f"删除临时目录: {temp_path}")
+        except Exception as e:
+            logger.debug(f"临时目录非空或删除失败 {temp_path}: {e}")
+    
+    # 清理进度文件
+    if progress_file and os.path.exists(progress_file):
+        try:
+            os.unlink(progress_file)
+            logger.debug(f"删除进度文件: {progress_file}")
+        except Exception as e:
+            logger.warning(f"删除进度文件失败 {progress_file}: {e}")
+    
+    if cleaned_count > 0:
+        logger.info(f"清理完成，删除了 {cleaned_count} 个临时PDF文件")
+    
+    return cleaned_count
 
 def normalize_url(url, base_url):
     """标准化URL并移除URL片段"""
@@ -509,7 +656,7 @@ def _prepare_page_for_pdf(page, content_selector, verbose_mode, timeout_config, 
     
     return True
 
-def _generate_pdf_from_page(page, verbose_mode, timeout_config):
+def _generate_pdf_from_page(page, verbose_mode, timeout_config, temp_dir: str, url: str):
     """从页面生成PDF"""
     logger.info("等待页面渲染...")
     if verbose_mode:
@@ -546,7 +693,9 @@ def _generate_pdf_from_page(page, verbose_mode, timeout_config):
     elif final_check['bodyTextLength'] < 50:
         logger.warning(f"警告：页面内容很少 ({final_check['bodyTextLength']} 字符)，可能生成近似空白的PDF")
     
-    temp_file = Path(tempfile.mktemp(suffix='.pdf'))
+    # 使用持久化的文件名
+    filename = url_to_filename(url)
+    temp_file = Path(temp_dir) / filename
     logger.info(f"生成PDF: {temp_file}")
     
     try:
@@ -572,8 +721,17 @@ def _generate_pdf_from_page(page, verbose_mode, timeout_config):
 
 def process_page_with_failure_tracking(context, url, content_selector, toc_selector, base_url, timeout_config: TimeoutConfig, 
                 max_retries, debug_mode=False, debug_dir=None, verbose_mode=False, load_strategy="normal", 
-                url_blacklist_patterns=None):
+                url_blacklist_patterns=None, temp_dir=None):
     """处理单个页面并生成PDF，同时提取该页面内的链接，包含失败跟踪"""
+    
+    # 检查是否已经处理过这个URL（根据PDF文件是否存在）
+    if temp_dir:
+        expected_pdf = Path(temp_dir) / url_to_filename(url)
+        if expected_pdf.exists() and expected_pdf.stat().st_size > 1000:  # 文件存在且大小合理
+            logger.info(f"发现已存在的PDF文件，跳过处理: {url}")
+            # 仍然需要提取链接，所以继续处理，但跳过PDF生成
+            pass
+    
     page = context.new_page()
     pdf_path = None
     links = []
@@ -600,6 +758,12 @@ def process_page_with_failure_tracking(context, url, content_selector, toc_selec
         # 提取页面链接
         links = _extract_page_links(page, toc_selector, final_url, base_url)
         
+        # 如果PDF已存在，直接返回
+        if temp_dir:
+            expected_pdf = Path(temp_dir) / url_to_filename(url)
+            if expected_pdf.exists() and expected_pdf.stat().st_size > 1000:
+                return expected_pdf, links, final_url, None
+        
         # 准备页面内容用于PDF生成
         if not _prepare_page_for_pdf(page, content_selector, verbose_mode, timeout_config, debug_mode, debug_dir, url):
             failure_reason = "内容元素不可见或不存在"
@@ -607,7 +771,10 @@ def process_page_with_failure_tracking(context, url, content_selector, toc_selec
             return None, links, final_url, failure_reason
         
         # 生成PDF
-        pdf_path = _generate_pdf_from_page(page, verbose_mode, timeout_config)
+        if not temp_dir:
+            temp_dir = tempfile.mkdtemp()
+            
+        pdf_path = _generate_pdf_from_page(page, verbose_mode, timeout_config, temp_dir, url)
         
         if not pdf_path:
             failure_reason = "PDF生成失败"
@@ -630,11 +797,11 @@ def process_page_with_failure_tracking(context, url, content_selector, toc_selec
 
 def process_page(context, url, content_selector, toc_selector, base_url, timeout_config: TimeoutConfig, 
                 max_retries, debug_mode=False, debug_dir=None, verbose_mode=False, load_strategy="normal", 
-                url_blacklist_patterns=None):
+                url_blacklist_patterns=None, temp_dir=None):
     """处理单个页面并生成PDF，同时提取该页面内的链接"""
     pdf_path, links, final_url, _ = process_page_with_failure_tracking(
         context, url, content_selector, toc_selector, base_url, timeout_config,
-        max_retries, debug_mode, debug_dir, verbose_mode, load_strategy, url_blacklist_patterns
+        max_retries, debug_mode, debug_dir, verbose_mode, load_strategy, url_blacklist_patterns, temp_dir
     )
     return pdf_path, links, final_url
 
@@ -670,30 +837,62 @@ def compile_blacklist_patterns(blacklist_args):
     
     return patterns
 
-def _crawl_pages(context, args, base_url_normalized, url_pattern, url_blacklist_patterns, timeout_config):
-    """执行页面爬取逻辑"""
-    visited = set()
-    enqueued = set()
-    queue = deque([(base_url_normalized, 0)])
-    enqueued.add(base_url_normalized)
+def _initialize_or_resume_progress(base_url_normalized, output_file, max_depth):
+    """初始化新的进度状态或从文件恢复进度状态"""
+    progress_file = create_progress_file_path(base_url_normalized, output_file)
     
-    pdf_files = []
-    processed_urls = []
-    failed_urls = []  # 记录失败的URL和原因
+    if progress_file.exists():
+        logger.info(f"发现进度文件: {progress_file}")
+        try:
+            progress_state = ProgressState.load_from_file(progress_file)
+            logger.info(f"成功恢复进度状态:")
+            logger.info(f"  - 已访问URL: {len(progress_state.visited_urls)} 个")
+            logger.info(f"  - 队列中URL: {len(progress_state.queue)} 个")
+            logger.info(f"  - 已生成PDF: {len(progress_state.pdf_files)} 个")
+            logger.info(f"  - 失败URL: {len(progress_state.failed_urls)} 个")
+            logger.info(f"  - 临时目录: {progress_state.temp_dir}")
+            return progress_state, True
+        except Exception as e:
+            logger.warning(f"恢复进度状态失败: {e}")
+            logger.info("将创建新的进度状态")
     
-    logger.info(f"开始爬取，最大深度: {args.max_depth}")
+    # 创建新的进度状态
+    progress_state = ProgressState(
+        base_url=base_url_normalized,
+        output_file=output_file,
+        max_depth=max_depth,
+        progress_file=progress_file
+    )
     
-    processed_count = 0  # 已处理的URL数量
+    # 初始化队列
+    progress_state.queue.append((base_url_normalized, 0))
+    progress_state.enqueued.add(base_url_normalized)
     
-    while queue:
-        url, depth = queue.popleft()
+    logger.info("创建新的进度状态")
+    return progress_state, False
+
+def _crawl_pages_with_progress(context, args, base_url_normalized, url_pattern, url_blacklist_patterns, 
+                              timeout_config, progress_state: ProgressState):
+    """执行页面爬取逻辑，支持进度恢复"""
+    
+    logger.info(f"开始/继续爬取，最大深度: {args.max_depth}")
+    
+    # 创建临时目录（如果不存在）
+    if not progress_state.temp_dir or not os.path.exists(progress_state.temp_dir):
+        progress_state.temp_dir = tempfile.mkdtemp(prefix='site_to_pdf_')
+        logger.info(f"创建临时目录: {progress_state.temp_dir}")
+    
+    processed_count = len(progress_state.visited_urls)  # 已处理的URL数量
+    
+    while progress_state.queue:
+        url, depth = progress_state.queue.popleft()
         processed_count += 1
         
         # 显示进度信息
-        total_discovered = len(enqueued)
+        total_discovered = len(progress_state.enqueued)
         progress_info = f"进度: [{processed_count}/{total_discovered}]"
-        if len(queue) > 0:
-            progress_info += f" (队列中还有 {len(queue)} 个)"
+        if len(progress_state.queue) > 0:
+            progress_info += f" (队列中还有 {len(progress_state.queue)} 个)"
         
         logger.info(f"{progress_info} 处理: {url} (深度: {depth})")
         
@@ -701,7 +900,7 @@ def _crawl_pages(context, args, base_url_normalized, url_pattern, url_blacklist_
             logger.warning(f"超过最大深度限制({args.max_depth})，跳过: {url}")
             continue
             
-        if url in visited:
+        if url in progress_state.visited_urls:
             logger.info(f"已访问过，跳过: {url}")
             continue
             
@@ -718,19 +917,20 @@ def _crawl_pages(context, args, base_url_normalized, url_pattern, url_blacklist_
                 args.debug_dir,
                 args.verbose,
                 args.load_strategy,
-                url_blacklist_patterns  # 传递URL黑名单模式
+                url_blacklist_patterns,  # 传递URL黑名单模式
+                progress_state.temp_dir  # 传递临时目录
             )
             
-            visited.add(url)
-            visited.add(final_url)
+            progress_state.visited_urls.add(url)
+            progress_state.visited_urls.add(final_url)
             
             if pdf_path and pdf_path.exists():
-                pdf_files.append(pdf_path)
-                processed_urls.append(url)
+                progress_state.pdf_files.append(pdf_path)
+                progress_state.processed_urls.append(url)
                 logger.info(f"✅ 成功生成PDF: {pdf_path}")
             else:
                 if failure_reason:
-                    failed_urls.append((url, failure_reason))
+                    progress_state.failed_urls.append((url, failure_reason))
                     logger.warning(f"❌ 页面处理失败，记录待重试: {url} - {failure_reason}")
                 else:
                     logger.warning(f"❌ 页面未生成PDF: {url}")
@@ -747,26 +947,31 @@ def _crawl_pages(context, args, base_url_normalized, url_pattern, url_blacklist_
                     logger.debug(f"跳过不符合模式的URL: {norm_url}")
                     continue
                 
-                if norm_url in visited or norm_url in enqueued:
+                if norm_url in progress_state.visited_urls or norm_url in progress_state.enqueued:
                     logger.debug(f"已存在，跳过URL: {norm_url}")
                     continue
                 
                 logger.info(f"🔗 添加新URL到队列: {norm_url} (深度: {depth+1})")
-                queue.append((norm_url, depth + 1))
-                enqueued.add(norm_url)
+                progress_state.queue.append((norm_url, depth + 1))
+                progress_state.enqueued.add(norm_url)
                 new_links_count += 1
             
             if new_links_count > 0:
-                logger.info(f"📊 从当前页面发现 {new_links_count} 个新链接，队列总数: {len(queue)}")
+                logger.info(f"📊 从当前页面发现 {new_links_count} 个新链接，队列总数: {len(progress_state.queue)}")
+            
+            # 每处理一个URL就保存进度
+            progress_state.save_to_file()
             
         except Exception as e:
             logger.exception(f"处理 {url} 时发生错误")
-            failed_urls.append((url, f"异常错误: {str(e)}"))
-            visited.add(url)
+            progress_state.failed_urls.append((url, f"异常错误: {str(e)}"))
+            progress_state.visited_urls.add(url)
+            # 即使出错也要保存进度
+            progress_state.save_to_file()
     
     # 最终统计
-    success_count = len(processed_urls)
-    failed_count = len(failed_urls)
+    success_count = len(progress_state.processed_urls)
+    failed_count = len(progress_state.failed_urls)
     total_processed = success_count + failed_count
     
     logger.info(f"\n📈 爬取完成统计:")
@@ -774,7 +979,7 @@ def _crawl_pages(context, args, base_url_normalized, url_pattern, url_blacklist_
     logger.info(f"   成功: {success_count} 个 ({success_count/total_processed*100:.1f}%)")
     logger.info(f"   失败: {failed_count} 个 ({failed_count/total_processed*100:.1f}%)")
     
-    return pdf_files, processed_urls, failed_urls
+    return progress_state
 
 def _interactive_retry_failed_urls(context, failed_urls, args, base_url_normalized, timeout_config):
     """交互式重试失败的URL"""
@@ -999,7 +1204,18 @@ def main():
                        help="页面加载策略：fast=仅等待DOM, normal=智能等待, thorough=完全等待网络空闲")
     parser.add_argument("--skip-failed-retry", action="store_true", 
                        help="跳过失败URL的交互式重试，直接处理成功的页面")
+    parser.add_argument("--resume", action="store_true", 
+                       help="自动恢复之前中断的爬取任务（如果存在）")
+    parser.add_argument("--cleanup", action="store_true", 
+                       help="清理指定URL和输出文件对应的临时文件和进度文件")
     args = parser.parse_args()
+    
+    # 处理清理命令
+    if args.cleanup:
+        base_url_normalized = normalize_url(args.base_url)
+        cleanup_temp_files(base_url_normalized, args.output_pdf)
+        logger.info("清理完成")
+        return
     
     logger.info(f"开始执行PDF爬虫程序，超时设置: {args.timeout}秒")
     
@@ -1057,26 +1273,65 @@ def main():
         
         context.set_default_timeout(args.timeout * 1000)
         
-        # 执行爬取
-        pdf_files, processed_urls, failed_urls = _crawl_pages(
-            context, args, base_url_normalized, url_pattern, 
-            url_blacklist_patterns, timeout_config
+        # 设置信号处理器，支持中断恢复
+        setup_signal_handlers()
+        
+        # 初始化或恢复进度状态
+        progress_state, is_resumed = _initialize_or_resume_progress(
+            base_url_normalized, args.output_pdf, args.max_depth
         )
         
-        # 如果有失败的URL，询问是否重试
-        retry_pdf_files, retry_processed_urls = _interactive_retry_failed_urls(
-            context, failed_urls, args, base_url_normalized, timeout_config
-        )
+        if is_resumed and not args.resume:
+            response = input("发现未完成的爬取任务，是否继续？[y/N]: ").strip().lower()
+            if response not in ['y', 'yes']:
+                logger.info("用户选择不继续，退出")
+                browser.close()
+                return
         
-        # 合并所有成功的文件
-        all_pdf_files = pdf_files + retry_pdf_files
-        all_processed_urls = processed_urls + retry_processed_urls
+        try:
+            # 执行爬取（支持进度恢复）
+            progress_state = _crawl_pages_with_progress(
+                context, args, base_url_normalized, url_pattern, 
+                url_blacklist_patterns, timeout_config, progress_state
+            )
+            
+            # 如果有失败的URL，询问是否重试
+            if progress_state.failed_urls and not args.skip_failed_retry:
+                retry_pdf_files, retry_processed_urls = _interactive_retry_failed_urls(
+                    context, progress_state.failed_urls, args, base_url_normalized, timeout_config
+                )
+                
+                # 合并重试成功的文件
+                progress_state.pdf_files.extend(retry_pdf_files)
+                progress_state.processed_urls.extend(retry_processed_urls)
+            
+            logger.info(f"爬取完成，关闭浏览器...")
+            browser.close()
+            
+            # 合并PDF文件
+            _merge_pdfs(progress_state.pdf_files, progress_state.processed_urls, args)
+            
+            # 成功完成后清理临时文件
+            if progress_state.temp_dir and os.path.exists(progress_state.temp_dir):
+                logger.info("清理临时文件...")
+                shutil.rmtree(progress_state.temp_dir)
+            
+            # 删除进度文件
+            if progress_state.progress_file and progress_state.progress_file.exists():
+                progress_state.progress_file.unlink()
+                logger.info("删除进度文件")
         
-        logger.info(f"爬取完成，关闭浏览器...")
-        browser.close()
-    
-    # 合并PDF文件
-    _merge_pdfs(all_pdf_files, all_processed_urls, args)
+        except KeyboardInterrupt:
+            logger.info("\n⚠️ 用户中断程序")
+            logger.info(f"进度已保存到: {progress_state.progress_file}")
+            logger.info(f"临时文件位于: {progress_state.temp_dir}")
+            logger.info("下次运行时可使用 --resume 参数继续")
+            browser.close()
+            return
+        except Exception as e:
+            logger.exception("程序执行过程中发生错误")
+            browser.close()
+            raise
 
 if __name__ == "__main__":
     main()
