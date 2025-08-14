@@ -683,9 +683,19 @@ def _crawl_pages(context, args, base_url_normalized, url_pattern, url_blacklist_
     
     logger.info(f"开始爬取，最大深度: {args.max_depth}")
     
+    processed_count = 0  # 已处理的URL数量
+    
     while queue:
         url, depth = queue.popleft()
-        logger.info(f"处理: {url} (深度: {depth})")
+        processed_count += 1
+        
+        # 显示进度信息
+        total_discovered = len(enqueued)
+        progress_info = f"进度: [{processed_count}/{total_discovered}]"
+        if len(queue) > 0:
+            progress_info += f" (队列中还有 {len(queue)} 个)"
+        
+        logger.info(f"{progress_info} 处理: {url} (深度: {depth})")
         
         if depth > args.max_depth:
             logger.warning(f"超过最大深度限制({args.max_depth})，跳过: {url}")
@@ -717,14 +727,16 @@ def _crawl_pages(context, args, base_url_normalized, url_pattern, url_blacklist_
             if pdf_path and pdf_path.exists():
                 pdf_files.append(pdf_path)
                 processed_urls.append(url)
-                logger.info(f"成功生成PDF: {pdf_path}")
+                logger.info(f"✅ 成功生成PDF: {pdf_path}")
             else:
                 if failure_reason:
                     failed_urls.append((url, failure_reason))
-                    logger.warning(f"页面处理失败，记录待重试: {url} - {failure_reason}")
+                    logger.warning(f"❌ 页面处理失败，记录待重试: {url} - {failure_reason}")
                 else:
-                    logger.warning(f"页面未生成PDF: {url}")
+                    logger.warning(f"❌ 页面未生成PDF: {url}")
             
+            # 处理新发现的链接
+            new_links_count = 0
             for link in links:
                 if not link:
                     continue
@@ -739,14 +751,28 @@ def _crawl_pages(context, args, base_url_normalized, url_pattern, url_blacklist_
                     logger.debug(f"已存在，跳过URL: {norm_url}")
                     continue
                 
-                logger.info(f"添加新URL到队列: {norm_url} (深度: {depth+1})")
+                logger.info(f"🔗 添加新URL到队列: {norm_url} (深度: {depth+1})")
                 queue.append((norm_url, depth + 1))
                 enqueued.add(norm_url)
+                new_links_count += 1
+            
+            if new_links_count > 0:
+                logger.info(f"📊 从当前页面发现 {new_links_count} 个新链接，队列总数: {len(queue)}")
             
         except Exception as e:
             logger.exception(f"处理 {url} 时发生错误")
             failed_urls.append((url, f"异常错误: {str(e)}"))
             visited.add(url)
+    
+    # 最终统计
+    success_count = len(processed_urls)
+    failed_count = len(failed_urls)
+    total_processed = success_count + failed_count
+    
+    logger.info(f"\n📈 爬取完成统计:")
+    logger.info(f"   总共处理: {total_processed} 个URL")
+    logger.info(f"   成功: {success_count} 个 ({success_count/total_processed*100:.1f}%)")
+    logger.info(f"   失败: {failed_count} 个 ({failed_count/total_processed*100:.1f}%)")
     
     return pdf_files, processed_urls, failed_urls
 
@@ -822,8 +848,8 @@ def _interactive_retry_failed_urls(context, failed_urls, args, base_url_normaliz
     retry_processed_urls = []
     still_failed_urls = []
     
-    for url in urls_to_retry:
-        logger.info(f"重试处理: {url}")
+    for i, url in enumerate(urls_to_retry, 1):
+        logger.info(f"🔄 重试进度: [{i}/{len(urls_to_retry)}] 处理: {url}")
         success = False
         
         for attempt in range(retry_count):
@@ -846,18 +872,25 @@ def _interactive_retry_failed_urls(context, failed_urls, args, base_url_normaliz
                 if pdf_path and pdf_path.exists():
                     retry_pdf_files.append(pdf_path)
                     retry_processed_urls.append(url)
-                    logger.info(f"重试成功: {url}")
+                    logger.info(f"✅ 重试成功: {url}")
                     success = True
                     break
                 else:
-                    logger.warning(f"重试第 {attempt + 1} 次失败: {url} - {failure_reason}")
+                    logger.warning(f"⚠️ 重试第 {attempt + 1}/{retry_count} 次失败: {url} - {failure_reason}")
                     
             except Exception as e:
-                logger.warning(f"重试第 {attempt + 1} 次异常: {url} - {str(e)}")
+                logger.warning(f"⚠️ 重试第 {attempt + 1}/{retry_count} 次异常: {url} - {str(e)}")
         
         if not success:
             still_failed_urls.append((url, "重试后仍然失败"))
-            logger.error(f"重试所有次数后仍然失败: {url}")
+            logger.error(f"❌ 重试所有次数后仍然失败: {url}")
+    
+    # 重试结果统计
+    retry_success_count = len(retry_processed_urls)
+    retry_failed_count = len(still_failed_urls)
+    logger.info(f"\n📊 重试结果统计:")
+    logger.info(f"   重试成功: {retry_success_count} 个")
+    logger.info(f"   重试后仍失败: {retry_failed_count} 个")
     
     if still_failed_urls:
         logger.warning(f"仍有 {len(still_failed_urls)} 个URL重试后依然失败:")
@@ -865,12 +898,14 @@ def _interactive_retry_failed_urls(context, failed_urls, args, base_url_normaliz
             logger.warning(f"  - {url}: {reason}")
     
     return retry_pdf_files, retry_processed_urls
+
+def _merge_pdfs(pdf_files, processed_urls, args):
     """合并PDF文件"""
     if not pdf_files:
         logger.error("未生成任何PDF，请检查参数")
         return []
     
-    logger.info(f"准备合并 {len(pdf_files)} 个PDF文件")
+    logger.info(f"📄 准备合并 {len(pdf_files)} 个PDF文件")
     
     base_path = Path(args.output_pdf)
     stem = base_path.stem
@@ -884,8 +919,11 @@ def _interactive_retry_failed_urls(context, failed_urls, args, base_url_normaliz
     file_index = 1
     merged_files = []
 
-    for i, pdf_file in enumerate(pdf_files):
+    for i, pdf_file in enumerate(pdf_files, 1):
         try:
+            progress_info = f"合并进度: [{i}/{len(pdf_files)}]"
+            logger.info(f"📄 {progress_info} 处理PDF文件: {pdf_file}")
+            
             if not pdf_file.exists():
                 logger.warning(f"PDF文件不存在: {pdf_file}")
                 continue
@@ -893,13 +931,13 @@ def _interactive_retry_failed_urls(context, failed_urls, args, base_url_normaliz
             with open(pdf_file, 'rb') as f:
                 reader = PdfReader(f)
                 num_pages = len(reader.pages)
-                logger.debug(f"处理PDF文件: {pdf_file}, 页数: {num_pages}")
+                logger.debug(f"   文件页数: {num_pages}")
                 
                 if current_pages > 0 and current_pages + num_pages > args.max_page:
                     output_name = f"{stem}.{file_index}{suffix}"
                     output_path = output_dir / output_name
                     
-                    logger.info(f"写入分卷 {output_path} (页数: {current_pages})")
+                    logger.info(f"📚 写入分卷 {output_path} (页数: {current_pages})")
                     with open(output_path, 'wb') as out:
                         merger.write(out)
                     merged_files.append(str(output_path))
@@ -927,14 +965,14 @@ def _interactive_retry_failed_urls(context, failed_urls, args, base_url_normaliz
             output_name = f"{stem}.{file_index}{suffix}"
             output_path = output_dir / output_name
         
-        logger.info(f"写入最终PDF: {output_path} (页数: {current_pages})")
+        logger.info(f"📚 写入最终PDF: {output_path} (页数: {current_pages})")
         with open(output_path, 'wb') as out:
             merger.write(out)
         merged_files.append(str(output_path))
     
     if merged_files:
-        logger.info(f"处理完成! 共处理 {len(processed_urls)} 个页面，生成长 {len(merged_files)} 个PDF文件")
-        logger.info(f"输出文件: {', '.join(merged_files)}")
+        logger.info(f"🎉 处理完成! 共处理 {len(processed_urls)} 个页面，生成 {len(merged_files)} 个PDF文件")
+        logger.info(f"📁 输出文件: {', '.join(merged_files)}")
     else:
         logger.error("没有PDF文件生成")
     
