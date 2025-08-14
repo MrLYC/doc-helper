@@ -161,12 +161,15 @@ def wait_for_element_visible(page, selector: str, timeout_config: TimeoutConfig,
         logger.info(f"智能等待模式：持续等待元素可见，最大等待时间 {timeout} 秒")
     
     wait_start_time = time.time()
+    consecutive_failures = 0  # 连续失败次数
+    max_consecutive_failures = 3  # 最大连续失败次数，超过后快速失败
     
     while time.time() - wait_start_time < timeout:
         is_ready, status_msg, text_length, element_info = check_element_visibility_and_content(page, selector)
         
         if is_ready:
             logger.info(f"内容元素已找到且可见: {status_msg}")
+            consecutive_failures = 0  # 重置失败计数
             
             if strategy == "normal":
                 # Normal模式有更复杂的内容检查逻辑
@@ -196,9 +199,16 @@ def wait_for_element_visible(page, selector: str, timeout_config: TimeoutConfig,
                 # Fast和Thorough模式只要元素可见就成功
                 return True
         else:
+            consecutive_failures += 1
             elapsed = time.time() - wait_start_time
             remaining = timeout - elapsed
-            logger.info(f"元素状态: {status_msg}, 已等待 {elapsed:.1f}s, 剩余 {remaining:.1f}s")
+            
+            # 如果是"元素不存在"且连续失败多次，可能是外部链接，快速失败
+            if "元素不存在" in status_msg and consecutive_failures >= max_consecutive_failures:
+                logger.warning(f"元素连续 {consecutive_failures} 次不存在，可能是外部链接或无效页面，快速失败")
+                return False
+            
+            logger.info(f"元素状态: {status_msg}, 已等待 {elapsed:.1f}s, 剩余 {remaining:.1f}s, 连续失败: {consecutive_failures}")
         
         time.sleep(check_interval)
     
@@ -560,23 +570,29 @@ def _generate_pdf_from_page(page, verbose_mode, timeout_config):
         logger.error(f"生成PDF失败: {pdf_err}")
         return None
 
-def process_page(context, url, content_selector, toc_selector, base_url, timeout_config: TimeoutConfig, 
+def process_page_with_failure_tracking(context, url, content_selector, toc_selector, base_url, timeout_config: TimeoutConfig, 
                 max_retries, debug_mode=False, debug_dir=None, verbose_mode=False, load_strategy="normal", 
                 url_blacklist_patterns=None):
-    """处理单个页面并生成PDF，同时提取该页面内的链接"""
+    """处理单个页面并生成PDF，同时提取该页面内的链接，包含失败跟踪"""
     page = context.new_page()
     pdf_path = None
     links = []
     final_url = url
+    failure_reason = None
     
     try:
         logger.info(f"准备处理页面: {url}")
         
         # 处理页面加载和重试逻辑
-        final_url = _handle_page_loading_with_retries(
-            page, url, content_selector, timeout_config, max_retries, 
-            verbose_mode, load_strategy, url_blacklist_patterns
-        )
+        try:
+            final_url = _handle_page_loading_with_retries(
+                page, url, content_selector, timeout_config, max_retries, 
+                verbose_mode, load_strategy, url_blacklist_patterns
+            )
+        except Exception as e:
+            failure_reason = f"页面加载失败: {str(e)}"
+            logger.warning(f"页面加载失败，将记录为待重试: {url} - {failure_reason}")
+            return None, [], url, failure_reason
         
         if final_url != url:
             logger.info(f"重定向: {url} -> {final_url}")
@@ -586,16 +602,24 @@ def process_page(context, url, content_selector, toc_selector, base_url, timeout
         
         # 准备页面内容用于PDF生成
         if not _prepare_page_for_pdf(page, content_selector, verbose_mode, timeout_config, debug_mode, debug_dir, url):
-            return None, links, final_url
+            failure_reason = "内容元素不可见或不存在"
+            logger.warning(f"页面内容准备失败，将记录为待重试: {url} - {failure_reason}")
+            return None, links, final_url, failure_reason
         
         # 生成PDF
         pdf_path = _generate_pdf_from_page(page, verbose_mode, timeout_config)
         
-        return pdf_path, links, final_url
+        if not pdf_path:
+            failure_reason = "PDF生成失败"
+            logger.warning(f"PDF生成失败，将记录为待重试: {url} - {failure_reason}")
+            return None, links, final_url, failure_reason
+        
+        return pdf_path, links, final_url, None
     
     except Exception as e:
+        failure_reason = f"处理页面异常: {str(e)}"
         logger.error(f"处理页面失败: {url}\n错误: {str(e)}", exc_info=True)
-        return None, links, final_url
+        return None, links, final_url, failure_reason
     
     finally:
         try:
@@ -603,6 +627,16 @@ def process_page(context, url, content_selector, toc_selector, base_url, timeout
             logger.info(f"已关闭页面: {url}")
         except Exception as close_err:
             logger.warning(f"关闭页面时出错: {str(close_err)}")
+
+def process_page(context, url, content_selector, toc_selector, base_url, timeout_config: TimeoutConfig, 
+                max_retries, debug_mode=False, debug_dir=None, verbose_mode=False, load_strategy="normal", 
+                url_blacklist_patterns=None):
+    """处理单个页面并生成PDF，同时提取该页面内的链接"""
+    pdf_path, links, final_url, _ = process_page_with_failure_tracking(
+        context, url, content_selector, toc_selector, base_url, timeout_config,
+        max_retries, debug_mode, debug_dir, verbose_mode, load_strategy, url_blacklist_patterns
+    )
+    return pdf_path, links, final_url
 
 def get_parent_path_pattern(base_url):
     """获取base_url的父目录作为默认URL匹配模式"""
@@ -645,6 +679,7 @@ def _crawl_pages(context, args, base_url_normalized, url_pattern, url_blacklist_
     
     pdf_files = []
     processed_urls = []
+    failed_urls = []  # 记录失败的URL和原因
     
     logger.info(f"开始爬取，最大深度: {args.max_depth}")
     
@@ -661,7 +696,7 @@ def _crawl_pages(context, args, base_url_normalized, url_pattern, url_blacklist_
             continue
             
         try:
-            pdf_path, links, final_url = process_page(
+            pdf_path, links, final_url, failure_reason = process_page_with_failure_tracking(
                 context, 
                 url, 
                 args.content_selector, 
@@ -684,7 +719,11 @@ def _crawl_pages(context, args, base_url_normalized, url_pattern, url_blacklist_
                 processed_urls.append(url)
                 logger.info(f"成功生成PDF: {pdf_path}")
             else:
-                logger.warning(f"页面未生成PDF: {url}")
+                if failure_reason:
+                    failed_urls.append((url, failure_reason))
+                    logger.warning(f"页面处理失败，记录待重试: {url} - {failure_reason}")
+                else:
+                    logger.warning(f"页面未生成PDF: {url}")
             
             for link in links:
                 if not link:
@@ -706,11 +745,126 @@ def _crawl_pages(context, args, base_url_normalized, url_pattern, url_blacklist_
             
         except Exception as e:
             logger.exception(f"处理 {url} 时发生错误")
+            failed_urls.append((url, f"异常错误: {str(e)}"))
             visited.add(url)
     
-    return pdf_files, processed_urls
+    return pdf_files, processed_urls, failed_urls
 
-def _merge_pdfs(pdf_files, processed_urls, args):
+def _interactive_retry_failed_urls(context, failed_urls, args, base_url_normalized, timeout_config):
+    """交互式重试失败的URL"""
+    if not failed_urls:
+        return [], []
+    
+    print(f"\n=== 发现 {len(failed_urls)} 个失败的URL ===")
+    for i, (url, reason) in enumerate(failed_urls, 1):
+        print(f"{i}. {url}")
+        print(f"   失败原因: {reason}")
+    
+    # 如果启用了跳过失败重试选项，直接返回
+    if args.skip_failed_retry:
+        logger.info("启用了跳过失败重试选项，直接处理成功的页面")
+        return [], []
+    
+    while True:
+        try:
+            choice = input(f"\n是否要重试失败的URL？\n"
+                          f"1. 重试所有失败的URL\n"
+                          f"2. 选择性重试\n"
+                          f"3. 跳过所有失败的URL\n"
+                          f"请选择 (1-3): ").strip()
+            
+            if choice == "3":
+                logger.info("用户选择跳过所有失败的URL")
+                return [], []
+            elif choice == "1":
+                urls_to_retry = [url for url, _ in failed_urls]
+                break
+            elif choice == "2":
+                urls_to_retry = []
+                for i, (url, reason) in enumerate(failed_urls, 1):
+                    retry_choice = input(f"重试 URL {i}: {url} ? (y/n): ").strip().lower()
+                    if retry_choice in ['y', 'yes', '是']:
+                        urls_to_retry.append(url)
+                break
+            else:
+                print("无效选择，请输入 1、2 或 3")
+                continue
+        except (EOFError, KeyboardInterrupt):
+            logger.info("用户取消重试")
+            return [], []
+    
+    if not urls_to_retry:
+        logger.info("没有选择要重试的URL")
+        return [], []
+    
+    # 询问重试次数
+    while True:
+        try:
+            retry_count = input(f"重试次数 (1-10, 默认3): ").strip()
+            if not retry_count:
+                retry_count = 3
+            else:
+                retry_count = int(retry_count)
+                if retry_count < 1 or retry_count > 10:
+                    print("重试次数必须在1-10之间")
+                    continue
+            break
+        except ValueError:
+            print("请输入有效的数字")
+            continue
+        except (EOFError, KeyboardInterrupt):
+            logger.info("用户取消重试")
+            return [], []
+    
+    logger.info(f"开始重试 {len(urls_to_retry)} 个失败的URL，重试次数: {retry_count}")
+    
+    retry_pdf_files = []
+    retry_processed_urls = []
+    still_failed_urls = []
+    
+    for url in urls_to_retry:
+        logger.info(f"重试处理: {url}")
+        success = False
+        
+        for attempt in range(retry_count):
+            try:
+                pdf_path, _, final_url, failure_reason = process_page_with_failure_tracking(
+                    context, 
+                    url, 
+                    args.content_selector, 
+                    args.toc_selector,
+                    base_url_normalized,
+                    timeout_config,
+                    args.max_retries,
+                    args.debug,
+                    args.debug_dir,
+                    args.verbose,
+                    args.load_strategy,
+                    []  # 重试时不应用黑名单，可能之前被误拦
+                )
+                
+                if pdf_path and pdf_path.exists():
+                    retry_pdf_files.append(pdf_path)
+                    retry_processed_urls.append(url)
+                    logger.info(f"重试成功: {url}")
+                    success = True
+                    break
+                else:
+                    logger.warning(f"重试第 {attempt + 1} 次失败: {url} - {failure_reason}")
+                    
+            except Exception as e:
+                logger.warning(f"重试第 {attempt + 1} 次异常: {url} - {str(e)}")
+        
+        if not success:
+            still_failed_urls.append((url, "重试后仍然失败"))
+            logger.error(f"重试所有次数后仍然失败: {url}")
+    
+    if still_failed_urls:
+        logger.warning(f"仍有 {len(still_failed_urls)} 个URL重试后依然失败:")
+        for url, reason in still_failed_urls:
+            logger.warning(f"  - {url}: {reason}")
+    
+    return retry_pdf_files, retry_processed_urls
     """合并PDF文件"""
     if not pdf_files:
         logger.error("未生成任何PDF，请检查参数")
@@ -805,6 +959,8 @@ def main():
     parser.add_argument("--fast-load", action="store_true", help="快速加载模式，跳过网络空闲等待")
     parser.add_argument("--load-strategy", choices=["fast", "normal", "thorough"], default="normal", 
                        help="页面加载策略：fast=仅等待DOM, normal=智能等待, thorough=完全等待网络空闲")
+    parser.add_argument("--skip-failed-retry", action="store_true", 
+                       help="跳过失败URL的交互式重试，直接处理成功的页面")
     args = parser.parse_args()
     
     logger.info(f"开始执行PDF爬虫程序，超时设置: {args.timeout}秒")
@@ -864,16 +1020,25 @@ def main():
         context.set_default_timeout(args.timeout * 1000)
         
         # 执行爬取
-        pdf_files, processed_urls = _crawl_pages(
+        pdf_files, processed_urls, failed_urls = _crawl_pages(
             context, args, base_url_normalized, url_pattern, 
             url_blacklist_patterns, timeout_config
         )
+        
+        # 如果有失败的URL，询问是否重试
+        retry_pdf_files, retry_processed_urls = _interactive_retry_failed_urls(
+            context, failed_urls, args, base_url_normalized, timeout_config
+        )
+        
+        # 合并所有成功的文件
+        all_pdf_files = pdf_files + retry_pdf_files
+        all_processed_urls = processed_urls + retry_processed_urls
         
         logger.info(f"爬取完成，关闭浏览器...")
         browser.close()
     
     # 合并PDF文件
-    _merge_pdfs(pdf_files, processed_urls, args)
+    _merge_pdfs(all_pdf_files, all_processed_urls, args)
 
 if __name__ == "__main__":
     main()
