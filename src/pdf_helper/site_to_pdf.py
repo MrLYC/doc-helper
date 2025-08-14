@@ -7,6 +7,8 @@ import time
 from urllib.parse import urlparse, urljoin
 import logging
 import urllib.parse
+from dataclasses import dataclass
+from typing import Tuple, Dict, Any, Optional
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from PyPDF2 import PdfMerger, PdfReader
@@ -21,6 +23,56 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+@dataclass
+class TimeoutConfig:
+    """超时配置管理"""
+    base_timeout: int  # 基础超时时间（来自命令行参数）
+    
+    @property
+    def initial_load_timeout(self) -> int:
+        """初始页面加载超时（毫秒）"""
+        return max(self.base_timeout, 30) * 1000
+    
+    @property
+    def fast_mode_timeout(self) -> int:
+        """快速模式超时（秒）"""
+        return max(self.base_timeout, 30)
+    
+    @property
+    def content_additional_wait(self) -> int:
+        """内容加载额外等待时间（秒）"""
+        return max(5, self.base_timeout // 4)
+    
+    @property
+    def thorough_min_timeout(self) -> int:
+        """彻底模式最小保留超时（秒）"""
+        return max(10, self.base_timeout // 2)
+    
+    @property
+    def retry_backoff_max(self) -> int:
+        """重试退避最大等待时间（秒）"""
+        return max(10, self.base_timeout // 6)
+    
+    @property
+    def element_check_interval(self) -> float:
+        """元素检查间隔（秒）"""
+        return 1.0
+    
+    @property
+    def fast_check_interval(self) -> float:
+        """快速模式检查间隔（秒）"""
+        return 0.5
+    
+    @property
+    def page_render_wait(self) -> float:
+        """页面渲染等待时间（秒）"""
+        return max(2.0, self.base_timeout * 0.02)
+    
+    @property
+    def min_pdf_size(self) -> int:
+        """最小PDF文件大小（字节）"""
+        return 5000
 
 def normalize_url(url, base_url):
     """标准化URL并移除URL片段"""
@@ -60,7 +112,103 @@ def resolve_selector(selector):
         return f'selector={selector}'
     return selector
 
-def process_page(context, url, content_selector, toc_selector, base_url, timeout_sec, max_retries, debug_mode=False, debug_dir=None, verbose_mode=False, load_strategy="normal"):
+def check_element_visibility_and_content(page, selector: str) -> Tuple[bool, str, int, Dict[str, Any]]:
+    """检查元素是否存在、可见且有足够内容"""
+    element = page.query_selector(resolve_selector(selector))
+    if not element:
+        return False, "元素不存在", 0, {}
+    
+    element_info = page.evaluate('''(el) => {
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return {
+            textLength: el.textContent ? el.textContent.trim().length : 0,
+            isVisible: rect.width > 0 && rect.height > 0,
+            width: rect.width,
+            height: rect.height,
+            display: style.display,
+            visibility: style.visibility,
+            opacity: parseFloat(style.opacity) || 1
+        };
+    }''', element)
+    
+    # 检查可见性
+    is_visible = (element_info['isVisible'] and 
+                element_info['display'] != 'none' and 
+                element_info['visibility'] != 'hidden' and 
+                element_info['opacity'] > 0.1)
+    
+    if not is_visible:
+        reason = f"元素不可见 (display:{element_info['display']}, visibility:{element_info['visibility']}, opacity:{element_info['opacity']}, size:{element_info['width']}x{element_info['height']})"
+        return False, reason, element_info['textLength'], element_info
+    
+    return True, "元素可见", element_info['textLength'], element_info
+
+def wait_for_element_visible(page, selector: str, timeout_config: TimeoutConfig, 
+                           strategy: str = "normal") -> bool:
+    """等待元素可见的通用函数"""
+    if strategy == "fast":
+        timeout = timeout_config.fast_mode_timeout
+        check_interval = timeout_config.fast_check_interval
+        logger.info(f"快速等待元素可见，最大等待时间 {timeout} 秒")
+    elif strategy == "thorough":
+        # thorough模式由调用方计算剩余时间
+        timeout = timeout_config.base_timeout  
+        check_interval = timeout_config.element_check_interval
+        logger.info(f"彻底模式：持续等待元素可见，剩余等待时间 {timeout:.1f} 秒")
+    else:  # normal
+        timeout = timeout_config.base_timeout
+        check_interval = timeout_config.element_check_interval
+        logger.info(f"智能等待模式：持续等待元素可见，最大等待时间 {timeout} 秒")
+    
+    wait_start_time = time.time()
+    
+    while time.time() - wait_start_time < timeout:
+        is_ready, status_msg, text_length, element_info = check_element_visibility_and_content(page, selector)
+        
+        if is_ready:
+            logger.info(f"内容元素已找到且可见: {status_msg}")
+            
+            if strategy == "normal":
+                # Normal模式有更复杂的内容检查逻辑
+                if text_length > 100:  # 如果已经有足够内容，直接成功
+                    logger.info(f"内容充足 ({text_length} 字符)，完成等待")
+                    return True
+                elif text_length > 0:
+                    # 有少量内容，再等待一段时间看是否有更多内容加载
+                    remaining_time = timeout - (time.time() - wait_start_time)
+                    additional_wait = min(remaining_time, timeout_config.content_additional_wait)
+                    
+                    if additional_wait > 0:
+                        logger.info(f"内容较少 ({text_length} 字符)，再等待 {additional_wait:.1f} 秒看是否有更多内容...")
+                        time.sleep(additional_wait)
+                        
+                        # 再次检查
+                        is_ready_again, _, text_length_again, _ = check_element_visibility_and_content(page, selector)
+                        if is_ready_again and text_length_again >= text_length:
+                            logger.info(f"内容已更新到 {text_length_again} 字符，接受当前状态")
+                        else:
+                            logger.info(f"内容无明显增加，接受当前状态 ({text_length} 字符)")
+                    
+                    return True
+                else:
+                    logger.info("元素可见但无文本内容，继续等待...")
+            else:
+                # Fast和Thorough模式只要元素可见就成功
+                return True
+        else:
+            elapsed = time.time() - wait_start_time
+            remaining = timeout - elapsed
+            logger.info(f"元素状态: {status_msg}, 已等待 {elapsed:.1f}s, 剩余 {remaining:.1f}s")
+        
+        time.sleep(check_interval)
+    
+    elapsed = time.time() - wait_start_time
+    logger.warning(f"{strategy}模式等待超时 ({elapsed:.1f}s)，元素仍不可见")
+    return False
+
+def process_page(context, url, content_selector, toc_selector, base_url, timeout_config: TimeoutConfig, 
+                max_retries, debug_mode=False, debug_dir=None, verbose_mode=False, load_strategy="normal"):
     """处理单个页面并生成PDF，同时提取该页面内的链接"""
     page = context.new_page()
     pdf_path = None
@@ -74,14 +222,11 @@ def process_page(context, url, content_selector, toc_selector, base_url, timeout
             try:
                 logger.info(f"尝试加载页面 ({attempt+1}/{max_retries}): {url}")
                 
-                # 使用更短的超时时间进行初始加载
-                initial_timeout = min(timeout_sec, 30) * 1000  # 最多30秒
-                
                 if verbose_mode:
                     logger.info("可视化模式：等待页面基本加载...")
                 
                 # 先尝试快速加载到 domcontentloaded 状态
-                page.goto(url, wait_until="domcontentloaded", timeout=initial_timeout)
+                page.goto(url, wait_until="domcontentloaded", timeout=timeout_config.initial_load_timeout)
                 logger.info("页面DOM已加载完成")
                 
                 if verbose_mode:
@@ -95,70 +240,33 @@ def process_page(context, url, content_selector, toc_selector, base_url, timeout
                 
                 # 根据加载策略决定后续行为
                 if load_strategy == "fast":
-                    logger.info("快速加载模式：跳过网络空闲等待")
+                    logger.info("快速加载模式：跳过网络空闲等待，但持续等待元素可见")
                     
-                    # 快速检查内容元素
-                    content_element = page.query_selector(resolve_selector(content_selector))
-                    if content_element:
-                        logger.info("内容元素已找到")
+                    if wait_for_element_visible(page, content_selector, timeout_config, "fast"):
                         break
-                    else:
-                        logger.warning(f"快速模式下未找到内容元素 (尝试 {attempt+1}/{max_retries})")
-                        if attempt < max_retries - 1:
-                            time.sleep(1)
+                    elif attempt < max_retries - 1:
+                        time.sleep(timeout_config.element_check_interval)
                 
                 elif load_strategy == "thorough":
-                    logger.info("彻底加载模式：等待完全的网络空闲")
+                    logger.info("彻底加载模式：等待完全的网络空闲，然后持续等待元素可见")
                     
+                    # 首先等待网络空闲
                     try:
-                        page.wait_for_load_state("networkidle", timeout=timeout_sec*1000)
+                        page.wait_for_load_state("networkidle", timeout=timeout_config.base_timeout*1000)
                         logger.info("网络已达到空闲状态")
                     except PlaywrightTimeoutError:
-                        logger.warning("网络空闲等待超时")
+                        logger.warning("网络空闲等待超时，继续等待元素可见")
                     
-                    content_element = page.query_selector(resolve_selector(content_selector))
-                    if content_element:
-                        logger.info("内容元素已找到")
+                    # 然后等待元素可见（使用剩余时间）
+                    remaining_timeout = max(timeout_config.base_timeout // 2, timeout_config.thorough_min_timeout)
+                    timeout_config_remaining = TimeoutConfig(remaining_timeout)
+                    
+                    if wait_for_element_visible(page, content_selector, timeout_config_remaining, "thorough"):
                         break
-                    else:
-                        logger.warning(f"彻底模式下未找到内容元素 (尝试 {attempt+1}/{max_retries})")
                 
                 else:  # normal strategy (智能等待)
-                    # 快速检查内容元素是否存在
-                    content_element = page.query_selector(resolve_selector(content_selector))
-                    if content_element:
-                        logger.info("内容元素已找到，检查内容充足性...")
-                        
-                        # 检查内容是否已经有足够的文本
-                        text_length = page.evaluate('(el) => el.textContent ? el.textContent.trim().length : 0', content_element)
-                        if text_length > 100:  # 如果已经有足够内容，直接成功
-                            logger.info(f"内容充足 ({text_length} 字符)，跳过额外等待")
-                            break
-                        else:
-                            logger.info(f"内容较少 ({text_length} 字符)，尝试等待更多内容加载...")
-                    
-                    # 尝试等待网络空闲，但使用较短的超时时间
-                    network_timeout = min(timeout_sec // 2, 15) * 1000  # 最多15秒
-                    logger.info(f"智能等待网络空闲状态 (超时: {network_timeout/1000}秒)...")
-                    
-                    try:
-                        page.wait_for_load_state("networkidle", timeout=network_timeout)
-                        logger.info("网络已达到空闲状态")
-                    except PlaywrightTimeoutError:
-                        logger.info("网络空闲等待超时，但页面可能已加载完成")
-                    except Exception as e:
-                        logger.warning(f"等待网络空闲时出错: {e}")
-                    
-                    # 再次检查内容元素
-                    content_element = page.query_selector(resolve_selector(content_selector))
-                    if content_element:
-                        logger.info("内容元素确认存在")
+                    if wait_for_element_visible(page, content_selector, timeout_config, "normal"):
                         break
-                    else:
-                        logger.warning(f"智能模式下未找到内容元素 (尝试 {attempt+1}/{max_retries})")
-                        if attempt < max_retries - 1:
-                            logger.info("等待2秒后重试...")
-                            time.sleep(2)
                 
             except PlaywrightTimeoutError as timeout_err:
                 if "Timeout" in str(timeout_err) and "goto" in str(timeout_err):
@@ -171,7 +279,7 @@ def process_page(context, url, content_selector, toc_selector, base_url, timeout
                     raise
                     
                 # 指数退避重试
-                wait_time = min(2 ** attempt, 10)
+                wait_time = min(2 ** attempt, timeout_config.retry_backoff_max)
                 logger.info(f"等待 {wait_time} 秒后重试...")
                 time.sleep(wait_time)
             
@@ -180,7 +288,7 @@ def process_page(context, url, content_selector, toc_selector, base_url, timeout
                     logger.error(f"所有重试均失败: {str(e)}")
                     raise
                 logger.warning(f"第 {attempt+1} 次页面加载异常: {str(e)}，重试中...")
-                wait_time = min(2 ** attempt, 10)
+                wait_time = min(2 ** attempt, timeout_config.retry_backoff_max)
                 time.sleep(wait_time)
         else:
             logger.error("所有重试均失败，跳过此页面")
@@ -224,32 +332,20 @@ def process_page(context, url, content_selector, toc_selector, base_url, timeout
             
             logger.info("分析内容元素...")
             
-            # 检查内容元素的基本信息
-            element_info = page.evaluate('''(element) => {
-                const rect = element.getBoundingClientRect();
-                return {
-                    tagName: element.tagName,
-                    textLength: element.textContent ? element.textContent.trim().length : 0,
-                    hasVisibleContent: rect.width > 0 && rect.height > 0,
-                    width: rect.width,
-                    height: rect.height,
-                    childElementCount: element.children.length,
-                    computedDisplay: window.getComputedStyle(element).display,
-                    computedVisibility: window.getComputedStyle(element).visibility
-                };
-            }''', content_element)
+            # 使用统一的元素检查函数
+            is_ready, status_msg, text_length, element_info = check_element_visibility_and_content(page, content_selector)
+            
+            if not is_ready:
+                logger.error(f"内容元素不可见，跳过PDF生成！{status_msg}")
+                return None, links, final_url
             
             logger.info(f"内容元素信息: {element_info}")
             
-            # 如果内容为空或不可见，记录警告
-            if element_info['textLength'] == 0:
-                logger.warning(f"警告：内容元素没有文本内容！")
-            if not element_info['hasVisibleContent']:
-                logger.warning(f"警告：内容元素不可见！宽度: {element_info['width']}, 高度: {element_info['height']}")
-            if element_info['computedDisplay'] == 'none':
-                logger.warning(f"警告：内容元素CSS display为none！")
-            if element_info['computedVisibility'] == 'hidden':
-                logger.warning(f"警告：内容元素CSS visibility为hidden！")
+            # 如果内容为空，记录警告但继续（可能是动态加载）
+            if text_length == 0:
+                logger.warning(f"警告：内容元素没有文本内容！可能是动态加载或空页面")
+            elif text_length < 50:
+                logger.warning(f"警告：内容元素文本很少 ({text_length} 字符)！")
                 
             logger.info("清理页面并保留主要内容...")
             
@@ -267,7 +363,7 @@ def process_page(context, url, content_selector, toc_selector, base_url, timeout
                     document.title = "[清理页面...] " + document.title.replace(/^\[.*?\] /, "");
                 }''')
                 # 在可视化模式下，稍微延迟一下让用户看到原始页面
-                time.sleep(1)
+                time.sleep(timeout_config.element_check_interval)
             
             # 新的清理逻辑：逐级向上清理DOM
             page.evaluate('''(element) => {
@@ -348,9 +444,9 @@ def process_page(context, url, content_selector, toc_selector, base_url, timeout
             page.evaluate('''() => {
                 document.title = "[准备生成PDF...] " + document.title.replace(/^\[.*?\] /, "");
             }''')
-            time.sleep(1)  # 在可视化模式下给用户更多时间观察
+            time.sleep(timeout_config.element_check_interval)  # 在可视化模式下给用户更多时间观察
         
-        time.sleep(2.0)  # 增加等待时间
+        time.sleep(timeout_config.page_render_wait)  # 使用配置的页面渲染等待时间
         
         # 在生成PDF前做最后的内容检查
         final_check = page.evaluate('''() => {
@@ -394,7 +490,7 @@ def process_page(context, url, content_selector, toc_selector, base_url, timeout
             if temp_file.exists():
                 file_size = temp_file.stat().st_size
                 logger.info(f"PDF文件生成成功，大小: {file_size} 字节")
-                if file_size < 5000:  # 小于5KB的PDF通常是空白的
+                if file_size < timeout_config.min_pdf_size:  # 使用配置的最小PDF大小
                     logger.warning(f"警告：PDF文件很小 ({file_size} 字节)，可能是空白页面")
             
             return temp_file, links, final_url
@@ -432,7 +528,12 @@ def main():
                        help="页面加载策略：fast=仅等待DOM, normal=智能等待, thorough=完全等待网络空闲")
     args = parser.parse_args()
     
-    logger.info(f"开始执行PDF爬虫程序")
+    logger.info(f"开始执行PDF爬虫程序，超时设置: {args.timeout}秒")
+    
+    # 创建超时配置对象
+    timeout_config = TimeoutConfig(args.timeout)
+    logger.info(f"超时配置 - 基础: {timeout_config.base_timeout}s, 快速模式: {timeout_config.fast_mode_timeout}s, "
+               f"初始加载: {timeout_config.initial_load_timeout}ms, 页面渲染: {timeout_config.page_render_wait}s")
     
     base_url_normalized = normalize_url(args.base_url, args.base_url)
     logger.info(f"标准化基准URL: {base_url_normalized}")
@@ -502,7 +603,7 @@ def main():
                     args.content_selector, 
                     args.toc_selector,
                     base_url_normalized,
-                    args.timeout,
+                    timeout_config,  # 传递超时配置对象
                     args.max_retries,
                     args.debug,
                     args.debug_dir,
