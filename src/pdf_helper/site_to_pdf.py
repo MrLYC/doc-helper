@@ -8,7 +8,7 @@ import time
 from urllib.parse import urlparse, urljoin
 import logging
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import asyncio
 import concurrent.futures
 from typing import Tuple, Dict, Any, Optional, List
