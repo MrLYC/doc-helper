@@ -33,68 +33,147 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class PagePool:
-    """页面池管理器，支持并行处理多个页面"""
+@dataclass
+class PageTask:
+    """页面任务信息"""
+    url: str
+    depth: int
+    page: any = None
+    load_future: any = None
+    loaded: bool = False
+    error: str = None
+
+class PipelinePagePool:
+    """流水线页面池管理器，支持真正的并行预加载和处理"""
     
     def __init__(self, context, pool_size: int = 2):
         """
-        初始化页面池
+        初始化流水线页面池
         
         Args:
             context: Playwright浏览器上下文
-            pool_size: 页面池大小，默认为2（一个处理当前页面，一个预加载下一个页面）
+            pool_size: 并行度，同时处理和预加载的页面数量
         """
         self.context = context
         self.pool_size = pool_size
-        self.pages = []
-        self.available_pages = queue.Queue()
-        self.lock = threading.Lock()
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=pool_size)
+        self.active_tasks = {}  # {task_id: PageTask}
+        self.task_counter = 0
         
-        # 创建页面池
-        for i in range(pool_size):
-            page = context.new_page()
-            self.pages.append(page)
-            self.available_pages.put(page)
-        
-        logger.info(f"创建页面池，大小: {pool_size}")
+        logger.info(f"创建流水线页面池，并行度: {pool_size}")
     
-    def get_page(self):
-        """获取一个可用页面"""
-        return self.available_pages.get()
-    
-    def return_page(self, page):
-        """归还页面到池中"""
-        # 清理页面状态（移除所有监听器，清理cookies等）
+    def _load_page_async(self, task: PageTask, content_selector: str, timeout_config, 
+                        url_blacklist_patterns, load_strategy: str, max_retries: int, verbose_mode: bool):
+        """异步加载页面到可处理状态"""
         try:
-            # 清理页面监听器
-            page.remove_all_listeners()
-            # 清理路由
-            page.unroute_all()
+            logger.info(f"🚀 开始预加载页面: {task.url}")
+            
+            # 创建新页面
+            task.page = self.context.new_page()
+            
+            # 使用现有的页面加载逻辑
+            final_url = _handle_page_loading_with_retries(
+                task.page, task.url, content_selector, timeout_config, max_retries,
+                verbose_mode, load_strategy, url_blacklist_patterns
+            )
+            
+            task.loaded = True
+            logger.info(f"✅ 页面预加载完成: {task.url}")
+            return final_url
+            
         except Exception as e:
-            logger.debug(f"清理页面状态时出错: {e}")
+            task.error = str(e)
+            task.loaded = False
+            logger.warning(f"❌ 页面预加载失败: {task.url} - {str(e)}")
+            if task.page:
+                try:
+                    task.page.close()
+                except:
+                    pass
+                task.page = None
+            return None
+    
+    def start_loading(self, url: str, depth: int, content_selector: str, timeout_config,
+                     url_blacklist_patterns, load_strategy: str, max_retries: int, verbose_mode: bool):
+        """开始异步加载一个页面"""
+        self.task_counter += 1
+        task_id = self.task_counter
         
-        self.available_pages.put(page)
+        task = PageTask(url=url, depth=depth)
+        
+        # 提交异步加载任务
+        future = self.executor.submit(
+            self._load_page_async, task, content_selector, timeout_config,
+            url_blacklist_patterns, load_strategy, max_retries, verbose_mode
+        )
+        task.load_future = future
+        self.active_tasks[task_id] = task
+        
+        logger.info(f"📋 启动页面预加载任务 #{task_id}: {url}")
+        return task_id
+    
+    def get_loaded_page(self, task_id: int, timeout: float = None):
+        """获取已加载完成的页面，如果还未完成则等待"""
+        if task_id not in self.active_tasks:
+            return None, None, None
+        
+        task = self.active_tasks[task_id]
+        
+        try:
+            # 等待加载完成
+            logger.info(f"⏳ 等待页面加载完成: {task.url}")
+            final_url = task.load_future.result(timeout=timeout)
+            
+            if task.loaded and task.page:
+                logger.info(f"🎯 页面已就绪，开始处理: {task.url}")
+                return task.page, final_url, None
+            else:
+                error_msg = task.error or "未知加载错误"
+                logger.warning(f"❌ 页面加载失败: {task.url} - {error_msg}")
+                return None, task.url, error_msg
+                
+        except concurrent.futures.TimeoutError:
+            logger.warning(f"⏰ 页面加载超时: {task.url}")
+            return None, task.url, "页面加载超时"
+        except Exception as e:
+            logger.error(f"❌ 获取页面时出错: {task.url} - {str(e)}")
+            return None, task.url, str(e)
+    
+    def finish_page(self, task_id: int):
+        """完成页面处理，清理资源"""
+        if task_id not in self.active_tasks:
+            return
+        
+        task = self.active_tasks[task_id]
+        
+        # 关闭页面
+        if task.page:
+            try:
+                task.page.close()
+                logger.debug(f"🔄 页面已关闭: {task.url}")
+            except Exception as e:
+                logger.debug(f"关闭页面时出错: {e}")
+        
+        # 清理任务
+        del self.active_tasks[task_id]
+        logger.debug(f"✨ 任务已清理 #{task_id}: {task.url}")
     
     def close_all(self):
-        """关闭所有页面"""
-        with self.lock:
-            # 清空队列并关闭所有页面
-            while not self.available_pages.empty():
+        """关闭所有页面和线程池"""
+        logger.info("🔄 正在关闭流水线页面池...")
+        
+        # 关闭所有活跃页面
+        for task_id, task in self.active_tasks.items():
+            if task.page:
                 try:
-                    page = self.available_pages.get_nowait()
-                    page.close()
+                    task.page.close()
                 except Exception as e:
                     logger.debug(f"关闭页面时出错: {e}")
-            
-            # 关闭剩余页面
-            for page in self.pages:
-                try:
-                    page.close()
-                except Exception as e:
-                    logger.debug(f"关闭页面时出错: {e}")
-            
-            self.pages.clear()
-            logger.info("页面池已关闭")
+        
+        # 关闭线程池
+        self.executor.shutdown(wait=True)
+        self.active_tasks.clear()
+        logger.info("流水线页面池已关闭")
 
 @dataclass
 class TimeoutConfig:
@@ -995,7 +1074,7 @@ def _initialize_or_resume_progress(base_url_normalized, output_file, max_depth, 
 
 def _crawl_pages_with_progress(context, args, base_url_normalized, url_pattern, url_blacklist_patterns, 
                               timeout_config, progress_state: ProgressState):
-    """执行页面爬取逻辑，支持进度恢复"""
+    """执行页面爬取逻辑，支持进度恢复和流水线并行处理"""
     
     logger.info(f"开始/继续爬取，最大深度: {args.max_depth}")
     
@@ -1004,16 +1083,25 @@ def _crawl_pages_with_progress(context, args, base_url_normalized, url_pattern, 
         os.makedirs(progress_state.temp_dir, exist_ok=True)
         logger.info(f"使用缓存目录: {progress_state.temp_dir}")
     
-    # 根据并行页面数量创建页面池或单页面
+    # 根据并行页面数量选择处理方式
     if args.parallel_pages > 1:
-        page_pool = PagePool(context, args.parallel_pages)
-        logger.info(f"启用并行处理模式，并行页面数: {args.parallel_pages}")
-        use_pool = True
+        return _crawl_pages_pipeline(
+            context, args, base_url_normalized, url_pattern, url_blacklist_patterns,
+            timeout_config, progress_state
+        )
     else:
-        # 单页面模式：创建一个持久的页面，重用以提高性能
-        page = context.new_page()
-        logger.info("启用串行处理模式，创建持久页面用于重用")
-        use_pool = False
+        return _crawl_pages_serial(
+            context, args, base_url_normalized, url_pattern, url_blacklist_patterns,
+            timeout_config, progress_state
+        )
+
+def _crawl_pages_serial(context, args, base_url_normalized, url_pattern, url_blacklist_patterns,
+                       timeout_config, progress_state: ProgressState):
+    """串行处理模式（兼容原有逻辑）"""
+    logger.info("启用串行处理模式，创建持久页面用于重用")
+    
+    # 创建一个持久的页面，重用以提高性能
+    page = context.new_page()
     
     try:
         processed_count = len(progress_state.visited_urls)  # 已处理的URL数量
@@ -1038,12 +1126,9 @@ def _crawl_pages_with_progress(context, args, base_url_normalized, url_pattern, 
                 logger.info(f"已访问过，跳过: {url}")
                 continue
             
-            # 获取页面（从池中或使用单页面）
-            current_page = page_pool.get_page() if use_pool else page
-            
             try:
                 pdf_path, links, final_url, failure_reason = process_page_with_failure_tracking(
-                    current_page,  # 传递页面
+                    page,  # 传递页面
                     url, 
                     args.content_selector, 
                     args.toc_selector,
@@ -1058,80 +1143,225 @@ def _crawl_pages_with_progress(context, args, base_url_normalized, url_pattern, 
                     progress_state.temp_dir  # 传递临时目录
                 )
                 
-                progress_state.visited_urls.add(url)
-                progress_state.visited_urls.add(final_url)
-                
-                if pdf_path and pdf_path.exists():
-                    progress_state.pdf_files.append(pdf_path)
-                    progress_state.processed_urls.append(url)
-                    logger.info(f"✅ 成功生成PDF: {pdf_path}")
-                else:
-                    if failure_reason:
-                        progress_state.failed_urls.append((url, failure_reason))
-                        logger.warning(f"❌ 页面处理失败，记录待重试: {url} - {failure_reason}")
-                    else:
-                        logger.warning(f"❌ 页面未生成PDF: {url}")
-                
-                # 处理新发现的链接
-                new_links_count = 0
-                for link in links:
-                    if not link:
-                        continue
-                        
-                    norm_url = normalize_url(link, base_url_normalized)
-                    
-                    if not url_pattern.match(norm_url):
-                        logger.debug(f"跳过不符合模式的URL: {norm_url}")
-                        continue
-                    
-                    if norm_url in progress_state.visited_urls or norm_url in progress_state.enqueued:
-                        logger.debug(f"已存在，跳过URL: {norm_url}")
-                        continue
-                    
-                    logger.info(f"🔗 添加新URL到队列: {norm_url} (深度: {depth+1})")
-                    progress_state.queue.append((norm_url, depth + 1))
-                    progress_state.enqueued.add(norm_url)
-                    new_links_count += 1
-                
-                if new_links_count > 0:
-                    logger.info(f"📊 从当前页面发现 {new_links_count} 个新链接，队列总数: {len(progress_state.queue)}")
-                
-                # 每处理一个URL就保存进度
-                progress_state.save_to_file()
+                _handle_page_result(
+                    progress_state, url, final_url, pdf_path, links, failure_reason,
+                    url_pattern, base_url_normalized, depth, args.max_depth
+                )
                 
             except Exception as e:
                 logger.exception(f"处理 {url} 时发生错误")
                 progress_state.failed_urls.append((url, f"异常错误: {str(e)}"))
                 progress_state.visited_urls.add(url)
-                # 即使出错也要保存进度
-                progress_state.save_to_file()
-            finally:
-                # 归还页面到池中（如果使用页面池）
-                if use_pool:
-                    page_pool.return_page(current_page)
+                
+            # 每处理一个URL就保存进度
+            progress_state.save_to_file()
         
     finally:
-        # 确保页面或页面池被正确关闭
-        if use_pool:
-            page_pool.close_all()
-        else:
-            try:
-                page.close()
-                logger.info("已关闭重用的页面")
-            except Exception as close_err:
-                logger.warning(f"关闭重用页面时出错: {str(close_err)}")
+        # 确保页面被正确关闭
+        try:
+            page.close()
+            logger.info("已关闭重用的页面")
+        except Exception as close_err:
+            logger.warning(f"关闭重用页面时出错: {str(close_err)}")
     
     # 最终统计
     success_count = len(progress_state.processed_urls)
     failed_count = len(progress_state.failed_urls)
     total_processed = success_count + failed_count
     
-    logger.info(f"\n📈 爬取完成统计:")
-    logger.info(f"   总共处理: {total_processed} 个URL")
-    logger.info(f"   成功: {success_count} 个 ({success_count/total_processed*100:.1f}%)")
-    logger.info(f"   失败: {failed_count} 个 ({failed_count/total_processed*100:.1f}%)")
+    if total_processed > 0:
+        logger.info(f"\n📈 串行处理完成统计:")
+        logger.info(f"   总共处理: {total_processed} 个URL")
+        logger.info(f"   成功: {success_count} 个 ({success_count/total_processed*100:.1f}%)")
+        logger.info(f"   失败: {failed_count} 个 ({failed_count/total_processed*100:.1f}%)")
     
     return progress_state
+
+def _crawl_pages_pipeline(context, args, base_url_normalized, url_pattern, url_blacklist_patterns,
+                         timeout_config, progress_state: ProgressState):
+    """流水线并行处理模式"""
+    logger.info(f"启用流水线并行处理模式，并行度: {args.parallel_pages}")
+    
+    # 创建流水线页面池
+    pipeline_pool = PipelinePagePool(context, args.parallel_pages)
+    
+    try:
+        processed_count = len(progress_state.visited_urls)
+        loading_tasks = {}  # {task_id: (url, depth)}
+        next_task_id = 0
+        
+        # 启动初始页面预加载
+        initial_batch_size = min(args.parallel_pages, len(progress_state.queue))
+        for _ in range(initial_batch_size):
+            if progress_state.queue:
+                url, depth = progress_state.queue.popleft()
+                if url not in progress_state.visited_urls and depth <= args.max_depth:
+                    task_id = pipeline_pool.start_loading(
+                        url, depth, args.content_selector, timeout_config,
+                        url_blacklist_patterns, args.load_strategy, args.max_retries, args.verbose
+                    )
+                    loading_tasks[task_id] = (url, depth)
+                    next_task_id = max(next_task_id, task_id + 1)
+        
+        logger.info(f"🚀 已启动 {len(loading_tasks)} 个初始预加载任务")
+        
+        # 流水线处理循环
+        while loading_tasks:
+            # 选择一个已完成加载的任务进行处理
+            completed_task_id = None
+            for task_id in loading_tasks:
+                # 尝试获取已加载的页面（不等待）
+                page, final_url, error = pipeline_pool.get_loaded_page(task_id, timeout=0.1)
+                if page is not None or error is not None:
+                    completed_task_id = task_id
+                    break
+            
+            if completed_task_id is None:
+                # 如果没有任务完成，等待最早的任务
+                earliest_task_id = min(loading_tasks.keys())
+                page, final_url, error = pipeline_pool.get_loaded_page(earliest_task_id, timeout=30)
+                completed_task_id = earliest_task_id
+            
+            # 处理已完成的任务
+            if completed_task_id in loading_tasks:
+                url, depth = loading_tasks[completed_task_id]
+                processed_count += 1
+                
+                # 显示进度信息
+                total_discovered = len(progress_state.enqueued)
+                remaining_in_queue = len(progress_state.queue)
+                active_loading = len(loading_tasks) - 1  # 减去当前正在处理的
+                progress_info = f"流水线进度: [{processed_count}/{total_discovered}]"
+                if remaining_in_queue > 0 or active_loading > 0:
+                    progress_info += f" (队列: {remaining_in_queue}, 预加载中: {active_loading})"
+                
+                logger.info(f"{progress_info} 处理: {url} (深度: {depth})")
+                
+                if depth > args.max_depth:
+                    logger.warning(f"超过最大深度限制({args.max_depth})，跳过: {url}")
+                elif url in progress_state.visited_urls:
+                    logger.info(f"已访问过，跳过: {url}")
+                elif page is not None:
+                    # 页面加载成功，进行内容处理
+                    try:
+                        pdf_path, links = _process_loaded_page(
+                            page, url, final_url or url, args, base_url_normalized, timeout_config,
+                            progress_state.temp_dir
+                        )
+                        
+                        _handle_page_result(
+                            progress_state, url, final_url or url, pdf_path, links, None,
+                            url_pattern, base_url_normalized, depth, args.max_depth
+                        )
+                        
+                    except Exception as e:
+                        logger.exception(f"处理已加载页面 {url} 时发生错误")
+                        progress_state.failed_urls.append((url, f"处理异常: {str(e)}"))
+                        progress_state.visited_urls.add(url)
+                else:
+                    # 页面加载失败
+                    failure_reason = error or "页面加载失败"
+                    logger.warning(f"页面加载失败: {url} - {failure_reason}")
+                    progress_state.failed_urls.append((url, failure_reason))
+                    progress_state.visited_urls.add(url)
+                
+                # 清理已完成的任务
+                pipeline_pool.finish_page(completed_task_id)
+                del loading_tasks[completed_task_id]
+                
+                # 启动新的预加载任务（如果队列中还有URL）
+                if progress_state.queue:
+                    next_url, next_depth = progress_state.queue.popleft()
+                    if next_url not in progress_state.visited_urls and next_depth <= args.max_depth:
+                        task_id = pipeline_pool.start_loading(
+                            next_url, next_depth, args.content_selector, timeout_config,
+                            url_blacklist_patterns, args.load_strategy, args.max_retries, args.verbose
+                        )
+                        loading_tasks[task_id] = (next_url, next_depth)
+                        logger.info(f"🚀 启动新的预加载任务 #{task_id}: {next_url}")
+                
+                # 每处理一个URL就保存进度
+                progress_state.save_to_file()
+        
+    finally:
+        # 确保流水线页面池被正确关闭
+        pipeline_pool.close_all()
+    
+    # 最终统计
+    success_count = len(progress_state.processed_urls)
+    failed_count = len(progress_state.failed_urls)
+    total_processed = success_count + failed_count
+    
+    if total_processed > 0:
+        logger.info(f"\n📈 流水线并行处理完成统计:")
+        logger.info(f"   总共处理: {total_processed} 个URL")
+        logger.info(f"   成功: {success_count} 个 ({success_count/total_processed*100:.1f}%)")
+        logger.info(f"   失败: {failed_count} 个 ({failed_count/total_processed*100:.1f}%)")
+    
+    return progress_state
+
+def _process_loaded_page(page, original_url, final_url, args, base_url_normalized, timeout_config, temp_dir):
+    """处理已加载的页面，生成PDF并提取链接"""
+    # 提取页面链接
+    links = _extract_page_links(page, args.toc_selector, final_url, base_url_normalized)
+    
+    # 检查是否已有PDF文件
+    if temp_dir:
+        expected_pdf = Path(temp_dir) / url_to_filename(original_url)
+        if expected_pdf.exists() and expected_pdf.stat().st_size > 1000:
+            logger.info(f"发现已存在的PDF文件，跳过生成: {original_url}")
+            return expected_pdf, links
+    
+    # 准备页面内容用于PDF生成
+    if not _prepare_page_for_pdf(page, args.content_selector, args.verbose, timeout_config, 
+                                  args.debug, args.debug_dir, original_url):
+        return None, links
+    
+    # 生成PDF
+    pdf_path = _generate_pdf_from_page(page, args.verbose, timeout_config, temp_dir, original_url)
+    
+    return pdf_path, links
+
+def _handle_page_result(progress_state, url, final_url, pdf_path, links, failure_reason,
+                       url_pattern, base_url_normalized, depth, max_depth):
+    """处理页面处理结果，更新进度状态"""
+    progress_state.visited_urls.add(url)
+    progress_state.visited_urls.add(final_url)
+    
+    if pdf_path and pdf_path.exists():
+        progress_state.pdf_files.append(pdf_path)
+        progress_state.processed_urls.append(url)
+        logger.info(f"✅ 成功生成PDF: {pdf_path}")
+    else:
+        if failure_reason:
+            progress_state.failed_urls.append((url, failure_reason))
+            logger.warning(f"❌ 页面处理失败，记录待重试: {url} - {failure_reason}")
+        else:
+            logger.warning(f"❌ 页面未生成PDF: {url}")
+    
+    # 处理新发现的链接
+    new_links_count = 0
+    for link in links:
+        if not link:
+            continue
+            
+        norm_url = normalize_url(link, base_url_normalized)
+        
+        if not url_pattern.match(norm_url):
+            logger.debug(f"跳过不符合模式的URL: {norm_url}")
+            continue
+        
+        if norm_url in progress_state.visited_urls or norm_url in progress_state.enqueued:
+            logger.debug(f"已存在，跳过URL: {norm_url}")
+            continue
+        
+        logger.info(f"🔗 添加新URL到队列: {norm_url} (深度: {depth+1})")
+        progress_state.queue.append((norm_url, depth + 1))
+        progress_state.enqueued.add(norm_url)
+        new_links_count += 1
+    
+    if new_links_count > 0:
+        logger.info(f"📊 从当前页面发现 {new_links_count} 个新链接，队列总数: {len(progress_state.queue)}")
 
 def _interactive_retry_failed_urls(context, failed_urls, args, base_url_normalized, timeout_config, url_blacklist_patterns):
     """交互式重试失败的URL"""
@@ -1201,9 +1431,9 @@ def _interactive_retry_failed_urls(context, failed_urls, args, base_url_normaliz
     
     logger.info(f"开始重试 {len(urls_to_retry)} 个失败的URL，重试次数: {retry_count}")
     
-    # 创建重试专用页面
+    # 重试时总是使用串行模式，避免复杂性
     retry_page = context.new_page()
-    logger.info("为重试创建专用页面")
+    logger.info("为重试创建专用页面（串行模式）")
     
     try:
         retry_pdf_files = []
