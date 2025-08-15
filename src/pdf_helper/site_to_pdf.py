@@ -485,6 +485,7 @@ def _setup_slow_request_monitoring(page, timeout_config: TimeoutConfig):
     """设置慢请求监控，打印请求时间超过超时时间1/5的链接"""
     slow_requests = {}
     warned_slow_failed_urls = set()
+    warned_slow_response_urls = set()
 
     # 使用配置的慢请求阈值
     slow_threshold = timeout_config.slow_request_threshold
@@ -497,8 +498,10 @@ def _setup_slow_request_monitoring(page, timeout_config: TimeoutConfig):
         request_url = response.url
         if request_url in slow_requests:
             duration = time.time() - slow_requests[request_url]
-            if duration > slow_threshold:
+            # 去重：只对每个URL记录一次慢请求日志
+            if duration > slow_threshold and request_url not in warned_slow_response_urls:
                 logger.warning(f"⏰ 请求过久 ({duration:.1f}s > {slow_threshold:.1f}s): {request_url}")
+                warned_slow_response_urls.add(request_url)
             del slow_requests[request_url]
 
     def on_request_failed(request):
