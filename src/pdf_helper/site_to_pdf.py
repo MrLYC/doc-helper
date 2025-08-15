@@ -1030,7 +1030,7 @@ def _generate_pdf_from_page(page, verbose_mode, timeout_config, temp_dir: str, u
             format='A4',
             print_background=True,
             margin={'top': '1cm', 'right': '1cm', 'bottom': '1cm', 'left': '1cm'},
-            scale=0.95
+            scale=0.99,
         )
         
         # 检查生成的PDF文件大小
