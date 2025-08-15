@@ -246,16 +246,46 @@ def setup_signal_handlers(progress_state: ProgressState):
     signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
     signal.signal(signal.SIGTERM, signal_handler)  # 终止信号
 
-def create_progress_file_path(output_pdf: str, base_url: str) -> str:
+def create_progress_file_path(cache_dir: Path, base_url: str) -> str:
     """创建进度文件路径"""
-    output_path = Path(output_pdf)
-    base_name = output_path.stem
-    
     # 使用base_url的哈希值确保唯一性
     url_hash = hashlib.md5(base_url.encode('utf-8')).hexdigest()[:8]
     
-    progress_file = output_path.parent / f".{base_name}_{url_hash}.progress"
+    progress_file = cache_dir / f"progress_{url_hash}.json"
     return str(progress_file)
+
+def calculate_cache_id(base_url: str, content_selector: str, toc_selector: str, max_depth: int, url_pattern: str = None) -> str:
+    """根据关键参数计算缓存ID"""
+    # 将关键参数组合成字符串
+    key_params = f"{base_url}|{content_selector}|{toc_selector}|{max_depth}|{url_pattern or ''}"
+    
+    # 计算MD5哈希
+    cache_id = hashlib.md5(key_params.encode('utf-8')).hexdigest()[:12]
+    return cache_id
+
+def get_cache_directory(cache_id: str) -> Path:
+    """获取缓存目录路径"""
+    import tempfile
+    
+    # 在系统临时目录下创建专用的缓存目录
+    base_cache_dir = Path(tempfile.gettempdir()) / "site_to_pdf_cache"
+    cache_dir = base_cache_dir / cache_id
+    
+    # 确保目录存在
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    
+    return cache_dir
+
+def cleanup_cache_directory(cache_dir: Path):
+    """清理缓存目录"""
+    if cache_dir.exists():
+        try:
+            shutil.rmtree(cache_dir)
+            logger.info(f"已清理缓存目录: {cache_dir}")
+        except Exception as e:
+            logger.warning(f"清理缓存目录失败: {e}")
+    else:
+        logger.debug(f"缓存目录不存在: {cache_dir}")
 
 def cleanup_temp_files(temp_dir: str, progress_file: str = None):
     """清理临时文件"""
@@ -857,7 +887,8 @@ def process_page_with_failure_tracking(page, url, content_selector, toc_selector
         
         # 生成PDF
         if not temp_dir:
-            temp_dir = tempfile.mkdtemp()
+            # 如果没有提供temp_dir，这里应该抛出错误，因为现在temp_dir应该总是由调用者提供
+            raise ValueError("temp_dir参数是必需的")
             
         pdf_path = _generate_pdf_from_page(page, verbose_mode, timeout_config, temp_dir, url)
         
@@ -915,12 +946,12 @@ def compile_blacklist_patterns(blacklist_args):
     
     return patterns
 
-def _initialize_or_resume_progress(base_url_normalized, output_file, max_depth):
+def _initialize_or_resume_progress(base_url_normalized, output_file, max_depth, cache_dir, use_cache=True):
     """初始化新的进度状态或从文件恢复进度状态"""
-    progress_file_path = create_progress_file_path(output_file, base_url_normalized)
+    progress_file_path = create_progress_file_path(cache_dir, base_url_normalized)
     progress_file = Path(progress_file_path)
     
-    if progress_file.exists():
+    if use_cache and progress_file.exists():
         logger.info(f"发现进度文件: {progress_file}")
         try:
             progress_state = ProgressState.load_from_file(str(progress_file))
@@ -939,7 +970,7 @@ def _initialize_or_resume_progress(base_url_normalized, output_file, max_depth):
     progress_state = ProgressState(
         base_url=base_url_normalized,
         output_pdf=output_file,
-        temp_dir="",
+        temp_dir=str(cache_dir),  # 使用缓存目录作为临时目录
         progress_file=str(progress_file),
         visited_urls=set(),
         failed_urls=[],
@@ -962,10 +993,10 @@ def _crawl_pages_with_progress(context, args, base_url_normalized, url_pattern, 
     
     logger.info(f"开始/继续爬取，最大深度: {args.max_depth}")
     
-    # 创建临时目录（如果不存在）
-    if not progress_state.temp_dir or not os.path.exists(progress_state.temp_dir):
-        progress_state.temp_dir = tempfile.mkdtemp(prefix='site_to_pdf_')
-        logger.info(f"创建临时目录: {progress_state.temp_dir}")
+    # 确保临时目录存在（使用已设置的缓存目录）
+    if progress_state.temp_dir and not os.path.exists(progress_state.temp_dir):
+        os.makedirs(progress_state.temp_dir, exist_ok=True)
+        logger.info(f"使用缓存目录: {progress_state.temp_dir}")
     
     # 根据并行页面数量创建页面池或单页面
     if args.parallel_pages > 1:
@@ -1321,7 +1352,7 @@ def main():
     parser.add_argument("--toc-selector", required=True, help="链接提取选择器")
     parser.add_argument("--output-pdf", required=True, help="输出PDF路径")
     parser.add_argument("--max-page", type=int, default=10000, help="单PDF最大页数")
-    parser.add_argument("--timeout", type=int, default=120, help="页面加载超时时间（秒）")
+    parser.add_argument("--timeout", type=int, default=60, help="页面加载超时时间（秒）")
     parser.add_argument("--max-depth", type=int, default=10, help="最大爬取深度")
     parser.add_argument("--max-retries", type=int, default=3, help="失败重试次数")
     parser.add_argument("--debug", action="store_true", help="启用调试模式，保存页面截图")
@@ -1332,8 +1363,8 @@ def main():
                        help="页面加载策略：fast=仅等待DOM, normal=智能等待, thorough=完全等待网络空闲")
     parser.add_argument("--skip-failed-retry", action="store_true", 
                        help="跳过失败URL的交互式重试，直接处理成功的页面")
-    parser.add_argument("--resume", action="store_true", 
-                       help="自动恢复之前中断的爬取任务（如果存在）")
+    parser.add_argument("--no-cache", action="store_true", 
+                       help="不使用缓存，强制重新爬取所有页面")
     parser.add_argument("--cleanup", action="store_true", 
                        help="清理指定URL和输出文件对应的临时文件和进度文件")
     parser.add_argument("--parallel-pages", type=int, default=2, choices=[1, 2, 3, 4],
@@ -1343,29 +1374,16 @@ def main():
     # 处理清理命令
     if args.cleanup:
         base_url_normalized = normalize_url(args.base_url)
-        progress_file = create_progress_file_path(args.output_pdf, base_url_normalized)
-        
-        # 尝试从进度文件中读取temp_dir
-        temp_dir = None
-        if os.path.exists(progress_file):
-            try:
-                with open(progress_file, 'r', encoding='utf-8') as f:
-                    progress_data = json.load(f)
-                    temp_dir = progress_data.get('temp_dir')
-            except Exception as e:
-                logger.warning(f"读取进度文件失败: {e}")
-        
-        if temp_dir:
-            cleanup_temp_files(temp_dir, progress_file)
-        else:
-            # 如果无法从进度文件获取temp_dir，删除进度文件
-            if os.path.exists(progress_file):
-                os.unlink(progress_file)
-                logger.info(f"删除进度文件: {progress_file}")
-            else:
-                logger.info("未找到需要清理的临时文件")
-        
-        logger.info("清理完成")
+        # 计算缓存ID
+        cache_id = calculate_cache_id(
+            base_url_normalized, 
+            args.content_selector, 
+            args.toc_selector, 
+            args.max_depth, 
+            args.url_pattern
+        )
+        cache_dir = get_cache_directory(cache_id)
+        cleanup_cache_directory(cache_dir)
         return
     
     logger.info(f"开始执行PDF爬虫程序，超时设置: {args.timeout}秒")
@@ -1382,9 +1400,6 @@ def main():
     url_blacklist_patterns = compile_blacklist_patterns(args.url_blacklist)
     if url_blacklist_patterns:
         logger.info(f"配置了 {len(url_blacklist_patterns)} 个URL黑名单模式")
-    
-    temp_dir = tempfile.TemporaryDirectory()
-    logger.info(f"临时目录创建: {temp_dir.name}")
     
     # 修改默认URL模式：使用父目录而非域名
     if args.url_pattern:
@@ -1424,20 +1439,32 @@ def main():
         
         context.set_default_timeout(args.timeout * 1000)
         
+        # 计算缓存ID和缓存目录
+        cache_id = calculate_cache_id(
+            base_url_normalized, 
+            args.content_selector, 
+            args.toc_selector, 
+            args.max_depth, 
+            args.url_pattern
+        )
+        cache_dir = get_cache_directory(cache_id)
+        use_cache = not args.no_cache
+        
+        logger.info(f"缓存目录: {cache_dir}")
+        logger.info(f"缓存模式: {'启用' if use_cache else '禁用'}")
+        
         # 初始化或恢复进度状态
         progress_state, is_resumed = _initialize_or_resume_progress(
-            base_url_normalized, args.output_pdf, args.max_depth
+            base_url_normalized, args.output_pdf, args.max_depth, cache_dir, use_cache
         )
         
         # 设置信号处理器，支持中断恢复
         setup_signal_handlers(progress_state)
         
-        if is_resumed and not args.resume:
-            response = input("发现未完成的爬取任务，是否继续？[y/N]: ").strip().lower()
-            if response not in ['y', 'yes']:
-                logger.info("用户选择不继续，退出")
-                browser.close()
-                return
+        if is_resumed and use_cache:
+            logger.info("发现未完成的爬取任务，自动继续执行...")
+        elif is_resumed and not use_cache:
+            logger.info("禁用缓存模式，将从头开始爬取")
         
         try:
             # 执行爬取（支持进度恢复）
@@ -1462,21 +1489,15 @@ def main():
             # 合并PDF文件
             _merge_pdfs(progress_state.pdf_files, progress_state.processed_urls, args)
             
-            # 成功完成后清理临时文件
-            if progress_state.temp_dir and os.path.exists(progress_state.temp_dir):
-                logger.info("清理临时文件...")
-                shutil.rmtree(progress_state.temp_dir)
+            # 成功完成后自动清理缓存目录
+            if use_cache:
+                cleanup_cache_directory(cache_dir)
             
-            # 删除进度文件
-            if progress_state.progress_file and os.path.exists(progress_state.progress_file):
-                os.unlink(progress_state.progress_file)
-                logger.info("删除进度文件")
-        
         except KeyboardInterrupt:
             logger.info("\n⚠️ 用户中断程序")
             logger.info(f"进度已保存到: {progress_state.progress_file}")
-            logger.info(f"临时文件位于: {progress_state.temp_dir}")
-            logger.info("下次运行时可使用 --resume 参数继续")
+            logger.info(f"缓存目录: {cache_dir}")
+            logger.info("下次运行时将自动继续（除非使用 --no-cache 参数）")
             browser.close()
             return
         except Exception as e:
