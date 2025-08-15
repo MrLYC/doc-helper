@@ -916,12 +916,13 @@ def compile_blacklist_patterns(blacklist_args):
 
 def _initialize_or_resume_progress(base_url_normalized, output_file, max_depth):
     """初始化新的进度状态或从文件恢复进度状态"""
-    progress_file = create_progress_file_path(base_url_normalized, output_file)
+    progress_file_path = create_progress_file_path(output_file, base_url_normalized)
+    progress_file = Path(progress_file_path)
     
     if progress_file.exists():
         logger.info(f"发现进度文件: {progress_file}")
         try:
-            progress_state = ProgressState.load_from_file(progress_file)
+            progress_state = ProgressState.load_from_file(str(progress_file))
             logger.info(f"成功恢复进度状态:")
             logger.info(f"  - 已访问URL: {len(progress_state.visited_urls)} 个")
             logger.info(f"  - 队列中URL: {len(progress_state.queue)} 个")
@@ -936,9 +937,15 @@ def _initialize_or_resume_progress(base_url_normalized, output_file, max_depth):
     # 创建新的进度状态
     progress_state = ProgressState(
         base_url=base_url_normalized,
-        output_file=output_file,
-        max_depth=max_depth,
-        progress_file=progress_file
+        output_pdf=output_file,
+        temp_dir="",
+        progress_file=str(progress_file),
+        visited_urls=set(),
+        failed_urls=[],
+        processed_urls=[],
+        pdf_files=[],
+        queue=deque(),
+        enqueued=set()
     )
     
     # 初始化队列
@@ -1460,8 +1467,8 @@ def main():
                 shutil.rmtree(progress_state.temp_dir)
             
             # 删除进度文件
-            if progress_state.progress_file and progress_state.progress_file.exists():
-                progress_state.progress_file.unlink()
+            if progress_state.progress_file and os.path.exists(progress_state.progress_file):
+                os.unlink(progress_state.progress_file)
                 logger.info("删除进度文件")
         
         except KeyboardInterrupt:
