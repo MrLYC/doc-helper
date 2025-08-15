@@ -1,5 +1,4 @@
 import argparse
-import concurrent.futures
 import hashlib
 import json
 import logging
@@ -39,13 +38,12 @@ class PageTask:
     url: str
     depth: int
     page: Any = None
-    load_future: Any = None
     loaded: bool = False
     error: str | None = None
 
 
 class PipelinePagePool:
-    """流水线页面池管理器，支持真正的并行预加载和处理"""
+    """流水线页面池管理器，支持页面重用和管理"""
 
     def __init__(self, context, pool_size: int = 2):
         """
@@ -53,18 +51,39 @@ class PipelinePagePool:
 
         Args:
             context: Playwright浏览器上下文
-            pool_size: 并行度，同时处理和预加载的页面数量
+            pool_size: 并行度，同时处理的页面数量
 
         """
         self.context = context
         self.pool_size = pool_size
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=pool_size)
         self.active_tasks: dict[int, PageTask] = {}  # {task_id: PageTask}
         self.task_counter = 0
+        self.available_pages = []  # 可重用的页面池
 
         logger.info(f"创建流水线页面池，并行度: {pool_size}")
 
-    def _load_page_async(
+    def _get_or_create_page(self):
+        """获取或创建一个页面"""
+        if self.available_pages:
+            return self.available_pages.pop()
+        else:
+            return self.context.new_page()
+
+    def _return_page(self, page):
+        """返回页面到池中以便重用"""
+        try:
+            # 简单清理页面状态
+            if page and not page.is_closed():
+                self.available_pages.append(page)
+        except Exception as e:
+            logger.debug(f"返回页面到池时出错: {e}")
+            try:
+                if page and not page.is_closed():
+                    page.close()
+            except:
+                pass
+
+    def _load_page_sync(
         self,
         task: PageTask,
         content_selector: str,
@@ -74,12 +93,12 @@ class PipelinePagePool:
         max_retries: int,
         verbose_mode: bool,
     ):
-        """异步加载页面到可处理状态"""
+        """同步加载页面到可处理状态"""
         try:
-            logger.info(f"🚀 开始预加载页面: {task.url}")
+            logger.info(f"🚀 开始加载页面: {task.url}")
 
-            # 创建新页面
-            task.page = self.context.new_page()
+            # 获取页面（重用或创建新的）
+            task.page = self._get_or_create_page()
 
             # 使用现有的页面加载逻辑
             final_url = _handle_page_loading_with_retries(
@@ -94,13 +113,13 @@ class PipelinePagePool:
             )
 
             task.loaded = True
-            logger.info(f"✅ 页面预加载完成: {task.url}")
+            logger.info(f"✅ 页面加载完成: {task.url}")
             return final_url
 
         except Exception as e:
             task.error = str(e)
             task.loaded = False
-            logger.warning(f"❌ 页面预加载失败: {task.url} - {e!s}")
+            logger.warning(f"❌ 页面加载失败: {task.url} - {e!s}")
             if task.page:
                 try:
                     task.page.close()  # type: ignore
@@ -120,15 +139,14 @@ class PipelinePagePool:
         max_retries: int,
         verbose_mode: bool,
     ):
-        """开始异步加载一个页面"""
+        """开始加载一个页面"""
         self.task_counter += 1
         task_id = self.task_counter
 
         task = PageTask(url=url, depth=depth)
 
-        # 提交异步加载任务
-        future = self.executor.submit(
-            self._load_page_async,
+        # 直接同步加载页面
+        final_url = self._load_page_sync(
             task,
             content_selector,
             timeout_config,
@@ -137,59 +155,45 @@ class PipelinePagePool:
             max_retries,
             verbose_mode,
         )
-        task.load_future = future
+
         self.active_tasks[task_id] = task
 
-        logger.info(f"📋 启动页面预加载任务 #{task_id}: {url}")
+        logger.info(f"📋 完成页面加载任务 #{task_id}: {url}")
         return task_id
 
     def get_loaded_page(self, task_id: int, timeout: float | None = None):
-        """获取已加载完成的页面，如果还未完成则等待"""
+        """获取已加载完成的页面"""
         if task_id not in self.active_tasks:
             return None, None, None
 
         task = self.active_tasks[task_id]
 
-        try:
-            # 等待加载完成
-            logger.info(f"⏳ 等待页面加载完成: {task.url}")
-            final_url = task.load_future.result(timeout=timeout)
+        if task.loaded and task.page:
+            logger.info(f"🎯 页面已就绪，开始处理: {task.url}")
+            return task.page, task.url, None
 
-            if task.loaded and task.page:
-                logger.info(f"🎯 页面已就绪，开始处理: {task.url}")
-                return task.page, final_url, None
-            error_msg = task.error or "未知加载错误"
-            logger.warning(f"❌ 页面加载失败: {task.url} - {error_msg}")
-            return None, task.url, error_msg
-
-        except concurrent.futures.TimeoutError:
-            logger.warning(f"⏰ 页面加载超时: {task.url}")
-            return None, task.url, "页面加载超时"
-        except Exception as e:
-            logger.error(f"❌ 获取页面时出错: {task.url} - {e!s}")
-            return None, task.url, str(e)
+        error_msg = task.error or "页面加载失败"
+        logger.warning(f"❌ 页面加载失败: {task.url} - {error_msg}")
+        return None, task.url, error_msg
 
     def finish_page(self, task_id: int):
-        """完成页面处理，清理资源"""
+        """完成页面处理，返回页面到池中以便重用"""
         if task_id not in self.active_tasks:
             return
 
         task = self.active_tasks[task_id]
 
-        # 关闭页面
+        # 将页面返回到池中重用，而不是关闭
         if task.page:
-            try:
-                task.page.close()
-                logger.debug(f"🔄 页面已关闭: {task.url}")
-            except Exception as e:
-                logger.debug(f"关闭页面时出错: {e}")
+            self._return_page(task.page)
+            logger.debug(f"🔄 页面已返回到池中: {task.url}")
 
         # 清理任务
         del self.active_tasks[task_id]
         logger.debug(f"✨ 任务已清理 #{task_id}: {task.url}")
 
     def close_all(self):
-        """关闭所有页面和线程池"""
+        """关闭所有页面"""
         logger.info("🔄 正在关闭流水线页面池...")
 
         # 关闭所有活跃页面
@@ -200,9 +204,16 @@ class PipelinePagePool:
                 except Exception as e:
                     logger.debug(f"关闭页面时出错: {e}")
 
-        # 关闭线程池
-        self.executor.shutdown(wait=True)
+        # 关闭池中的可重用页面
+        for page in self.available_pages:
+            try:
+                if not page.is_closed():
+                    page.close()
+            except Exception as e:
+                logger.debug(f"关闭池页面时出错: {e}")
+
         self.active_tasks.clear()
+        self.available_pages.clear()
         logger.info("流水线页面池已关闭")
 
 
