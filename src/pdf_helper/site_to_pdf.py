@@ -231,6 +231,86 @@ class TimeoutConfig:
         return self.base_timeout / 10.0
 
 @dataclass
+class DomainFailureTracker:
+    """域名失败跟踪器，用于自动黑名单功能"""
+    failure_counts: dict = field(default_factory=dict)  # {domain: failure_count}
+    auto_threshold: int = 10
+    auto_blacklist_patterns: list = field(default_factory=list)
+    
+    def record_failure(self, url: str):
+        """记录URL失败，提取域名并增加失败计数"""
+        try:
+            parsed = urlparse(url)
+            domain = parsed.netloc.lower()
+            
+            if not domain:
+                return False
+            
+            # 增加失败计数
+            self.failure_counts[domain] = self.failure_counts.get(domain, 0) + 1
+            
+            # 检查是否达到自动黑名单阈值
+            if self.failure_counts[domain] >= self.auto_threshold:
+                # 创建域名黑名单模式
+                domain_pattern = f"https?://{re.escape(domain)}/.*"
+                
+                # 检查是否已经在黑名单中
+                pattern_exists = any(
+                    pattern.pattern == domain_pattern 
+                    for pattern in self.auto_blacklist_patterns
+                )
+                
+                if not pattern_exists:
+                    try:
+                        compiled_pattern = re.compile(domain_pattern, re.IGNORECASE)
+                        self.auto_blacklist_patterns.append(compiled_pattern)
+                        logger.warning(f"🚫 域名 {domain} 失败 {self.failure_counts[domain]} 次，自动加入黑名单")
+                        return True
+                    except re.error as e:
+                        logger.warning(f"创建自动黑名单模式失败: {e}")
+            
+            return False
+        
+        except Exception as e:
+            logger.debug(f"记录域名失败时出错: {e}")
+            return False
+    
+    def get_all_patterns(self, manual_patterns: list = None):
+        """获取所有黑名单模式（手动+自动）"""
+        all_patterns = []
+        
+        # 添加手动黑名单
+        if manual_patterns:
+            all_patterns.extend(manual_patterns)
+        
+        # 添加自动黑名单
+        all_patterns.extend(self.auto_blacklist_patterns)
+        
+        return all_patterns
+    
+    def get_failure_summary(self):
+        """获取失败统计摘要"""
+        if not self.failure_counts:
+            return "无域名失败记录"
+        
+        # 按失败次数排序
+        sorted_failures = sorted(
+            self.failure_counts.items(), 
+            key=lambda x: x[1], 
+            reverse=True
+        )
+        
+        summary_lines = [f"域名失败统计 (阈值: {self.auto_threshold}):"]
+        for domain, count in sorted_failures[:10]:  # 只显示前10个
+            status = "🚫已拉黑" if count >= self.auto_threshold else "⚠️警告"
+            summary_lines.append(f"  {status} {domain}: {count} 次")
+        
+        if len(sorted_failures) > 10:
+            summary_lines.append(f"  ... 还有 {len(sorted_failures) - 10} 个域名")
+        
+        return "\n".join(summary_lines)
+
+@dataclass
 class ProgressState:
     """进度状态管理"""
     base_url: str
@@ -1293,7 +1373,8 @@ def _track_task_failure(task_id, qos_failure_tracker):
     logger.debug(f"记录任务 #{task_id} 失败，当前失败任务数: {len(qos_failure_tracker)}")
 
 def _process_completed_task_with_qos(pipeline_pool, loading_tasks, completed_task_id, progress_state, 
-                                   args, base_url_normalized, url_pattern, timeout_config, qos_failure_tracker):
+                                   args, base_url_normalized, url_pattern, timeout_config, qos_failure_tracker, 
+                                   domain_failure_tracker):
     """处理已完成的任务，包含QoS失败跟踪"""
     if completed_task_id not in loading_tasks:
         return False
@@ -1343,6 +1424,11 @@ def _process_completed_task_with_qos(pipeline_pool, loading_tasks, completed_tas
         progress_state.failed_urls.append((url, failure_reason))
         progress_state.visited_urls.add(url)
         task_failed = True
+        
+        # 记录域名失败用于自动黑名单
+        added_to_blacklist = domain_failure_tracker.record_failure(url)
+        if added_to_blacklist:
+            logger.info(f"🔄 自动黑名单已更新，当前共有 {len(domain_failure_tracker.auto_blacklist_patterns)} 个自动黑名单域名")
     
     # 记录任务失败用于QoS检测
     if task_failed:
@@ -1452,7 +1538,7 @@ def _start_new_loading_task(pipeline_pool, loading_tasks, progress_state, args, 
         logger.info(f"🚀 启动新的预加载任务 #{task_id}: {next_url}")
 
 def _crawl_pages_pipeline(context, args, base_url_normalized, url_pattern, url_blacklist_patterns,
-                         timeout_config, progress_state: ProgressState):
+                         timeout_config, progress_state: ProgressState, domain_failure_tracker):
     """流水线并行处理模式"""
     logger.info(f"启用流水线并行处理模式，并行度: {args.parallel_pages}")
     logger.info(f"QoS等待时间: {args.qos_wait} 秒（{args.qos_wait//60:.1f} 分钟）")
@@ -1466,8 +1552,10 @@ def _crawl_pages_pipeline(context, args, base_url_normalized, url_pattern, url_b
     
     try:
         # 启动初始页面预加载
+        # 使用动态黑名单（手动+自动）
+        combined_blacklist = domain_failure_tracker.get_all_patterns(url_blacklist_patterns)
         loading_tasks = _start_initial_loading_tasks(
-            pipeline_pool, progress_state, args, timeout_config, url_blacklist_patterns
+            pipeline_pool, progress_state, args, timeout_config, combined_blacklist
         )
         
         # 流水线处理循环
@@ -1487,7 +1575,8 @@ def _crawl_pages_pipeline(context, args, base_url_normalized, url_pattern, url_b
             # 处理已完成的任务（包含QoS失败跟踪）
             task_failed = _process_completed_task_with_qos(
                 pipeline_pool, loading_tasks, completed_task_id, progress_state,
-                args, base_url_normalized, url_pattern, timeout_config, qos_failure_tracker
+                args, base_url_normalized, url_pattern, timeout_config, qos_failure_tracker,
+                domain_failure_tracker
             )
             
             # 清理已完成的任务
@@ -1495,8 +1584,10 @@ def _crawl_pages_pipeline(context, args, base_url_normalized, url_pattern, url_b
             del loading_tasks[completed_task_id]
             
             # 启动新的预加载任务（如果队列中还有URL）
+            # 使用更新后的动态黑名单
+            combined_blacklist = domain_failure_tracker.get_all_patterns(url_blacklist_patterns)
             _start_new_loading_task(
-                pipeline_pool, loading_tasks, progress_state, args, timeout_config, url_blacklist_patterns
+                pipeline_pool, loading_tasks, progress_state, args, timeout_config, combined_blacklist
             )
             
             # 每处理一个URL就保存进度
@@ -1821,33 +1912,50 @@ def _merge_pdfs(pdf_files, processed_urls, args):
 def _create_argument_parser():
     """创建命令行参数解析器"""
     parser = argparse.ArgumentParser(description="Webpage to PDF converter")
-    parser.add_argument("--base-url", required=True, help="起始URL")
+    
+    # 必填参数 - 添加短参数
+    parser.add_argument("-u", "--base-url", required=True, help="起始URL")
+    parser.add_argument("-c", "--content-selector", required=True, help="内容容器选择器")
+    parser.add_argument("-t", "--toc-selector", required=True, help="链接提取选择器")
+    parser.add_argument("-o", "--output-pdf", required=True, help="输出PDF路径")
+    
+    # URL过滤相关参数
     parser.add_argument("--url-pattern", default=None, help="URL匹配模式正则表达式")
     parser.add_argument("--url-blacklist", action="append", default=[], 
                        help="URL黑名单模式正则表达式，可指定多个，阻止浏览器加载匹配的URL")
-    parser.add_argument("--content-selector", required=True, help="内容容器选择器")
-    parser.add_argument("--toc-selector", required=True, help="链接提取选择器")
-    parser.add_argument("--output-pdf", required=True, help="输出PDF路径")
+    parser.add_argument("--url-blacklist-auto-threshold", type=int, default=10,
+                       help="自动黑名单阈值，当某个域名出现指定次数的请求异常时，自动加入黑名单，默认10次")
+    
+    # 基本配置参数
     parser.add_argument("--max-page", type=int, default=10000, help="单PDF最大页数")
     parser.add_argument("--timeout", type=int, default=120, help="页面加载超时时间（秒）")
     parser.add_argument("--max-depth", type=int, default=10, help="最大爬取深度")
     parser.add_argument("--max-retries", type=int, default=3, help="失败重试次数")
-    parser.add_argument("--debug", action="store_true", help="启用调试模式，保存页面截图")
+    
+    # 调试和显示参数
+    parser.add_argument("-d", "--debug", action="store_true", help="启用调试模式，保存页面截图")
     parser.add_argument("--debug-dir", default="debug_screenshots", help="调试截图保存目录")
-    parser.add_argument("--verbose", action="store_true", help="显示浏览器界面，便于观察处理过程")
+    parser.add_argument("-v", "--verbose", action="store_true", help="显示浏览器界面，便于观察处理过程")
+    
+    # 加载策略参数
     parser.add_argument("--fast-load", action="store_true", help="快速加载模式，跳过网络空闲等待")
     parser.add_argument("--load-strategy", choices=["fast", "normal", "thorough"], default="thorough", 
                        help="页面加载策略：fast=仅等待DOM, normal=智能等待, thorough=完全等待网络空闲")
+    
+    # 重试和流控参数
     parser.add_argument("--skip-failed-retry", action="store_true", 
                        help="跳过失败URL的交互式重试，直接处理成功的页面")
-    parser.add_argument("--no-cache", action="store_true", 
-                       help="不使用缓存，强制重新爬取所有页面")
-    parser.add_argument("--cleanup", action="store_true", 
-                       help="清理指定URL和输出文件对应的临时文件和进度文件")
     parser.add_argument("--parallel-pages", type=int, default=2, choices=[1, 2, 3, 4],
                        help="并行页面数量 (1-4)，提高处理速度但会增加内存使用。1=串行处理，2+=并行处理")
     parser.add_argument("--qos-wait", type=int, default=600, 
                        help="QoS等待时间（秒），当检测到多个并行任务都失败时，等待指定时间以避免触发网站流控，默认600秒（10分钟）")
+    
+    # 缓存管理参数
+    parser.add_argument("--no-cache", action="store_true", 
+                       help="不使用缓存，强制重新爬取所有页面")
+    parser.add_argument("--cleanup", action="store_true", 
+                       help="清理指定URL和输出文件对应的临时文件和进度文件")
+    
     return parser
 
 def _handle_cleanup_command(args):
@@ -1875,10 +1983,18 @@ def _initialize_configuration(args):
     base_url_normalized = normalize_url(args.base_url, args.base_url)
     logger.info(f"标准化基准URL: {base_url_normalized}")
     
+    # 创建域名失败跟踪器
+    domain_failure_tracker = DomainFailureTracker(
+        failure_counts={},
+        auto_threshold=args.url_blacklist_auto_threshold,
+        auto_blacklist_patterns=[]
+    )
+    logger.info(f"自动黑名单阈值: {args.url_blacklist_auto_threshold} 次")
+    
     # 编译URL黑名单模式
     url_blacklist_patterns = compile_blacklist_patterns(args.url_blacklist)
     if url_blacklist_patterns:
-        logger.info(f"配置了 {len(url_blacklist_patterns)} 个URL黑名单模式")
+        logger.info(f"配置了 {len(url_blacklist_patterns)} 个手动URL黑名单模式")
     
     # 修改默认URL模式：使用父目录而非域名
     if args.url_pattern:
@@ -1889,7 +2005,7 @@ def _initialize_configuration(args):
         url_pattern = re.compile(default_pattern)
         logger.info(f"使用默认URL匹配模式（基于父目录）: {url_pattern.pattern}")
     
-    return timeout_config, base_url_normalized, url_blacklist_patterns, url_pattern
+    return timeout_config, base_url_normalized, url_blacklist_patterns, url_pattern, domain_failure_tracker
 
 def _setup_browser_context(p, args):
     """设置浏览器和上下文"""
@@ -1952,18 +2068,19 @@ def _setup_cache_and_progress(args, base_url_normalized):
     return cache_dir, use_cache, progress_state
 
 def _execute_crawling_workflow(context, args, base_url_normalized, url_pattern, 
-                              url_blacklist_patterns, timeout_config, progress_state):
+                              url_blacklist_patterns, timeout_config, progress_state, domain_failure_tracker):
     """执行爬取工作流"""
     # 执行爬取（支持进度恢复）
     progress_state = _crawl_pages_with_progress(
         context, args, base_url_normalized, url_pattern, 
-        url_blacklist_patterns, timeout_config, progress_state
+        url_blacklist_patterns, timeout_config, progress_state, domain_failure_tracker
     )
     
     # 如果有失败的URL，询问是否重试
     if progress_state.failed_urls and not args.skip_failed_retry:
         retry_pdf_files, retry_processed_urls = _interactive_retry_failed_urls(
-            context, progress_state.failed_urls, args, base_url_normalized, timeout_config, url_blacklist_patterns
+            context, progress_state.failed_urls, args, base_url_normalized, timeout_config, 
+            url_blacklist_patterns, domain_failure_tracker
         )
         
         # 合并重试成功的文件
@@ -1982,7 +2099,7 @@ def main():
         return
     
     # 初始化配置
-    timeout_config, base_url_normalized, url_blacklist_patterns, url_pattern = _initialize_configuration(args)
+    timeout_config, base_url_normalized, url_blacklist_patterns, url_pattern, domain_failure_tracker = _initialize_configuration(args)
     
     with sync_playwright() as p:
         browser, context = _setup_browser_context(p, args)
@@ -1991,11 +2108,16 @@ def main():
         try:
             progress_state = _execute_crawling_workflow(
                 context, args, base_url_normalized, url_pattern, 
-                url_blacklist_patterns, timeout_config, progress_state
+                url_blacklist_patterns, timeout_config, progress_state, domain_failure_tracker
             )
             
             logger.info(f"爬取完成，关闭浏览器...")
             browser.close()
+            
+            # 显示域名失败统计
+            failure_summary = domain_failure_tracker.get_failure_summary()
+            if failure_summary != "无域名失败记录":
+                logger.info(f"\n📊 {failure_summary}")
             
             # 合并PDF文件
             _merge_pdfs(progress_state.pdf_files, progress_state.processed_urls, args)
