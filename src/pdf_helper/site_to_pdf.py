@@ -9,12 +9,15 @@ from urllib.parse import urlparse, urljoin
 import logging
 import urllib.parse
 from dataclasses import dataclass
+import asyncio
+import concurrent.futures
 from typing import Tuple, Dict, Any, Optional, List
 import json
 import hashlib
 import signal
 import sys
 import os
+import threading
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from PyPDF2 import PdfMerger, PdfReader
@@ -28,6 +31,69 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+class PagePool:
+    """页面池管理器，支持并行处理多个页面"""
+    
+    def __init__(self, context, pool_size: int = 2):
+        """
+        初始化页面池
+        
+        Args:
+            context: Playwright浏览器上下文
+            pool_size: 页面池大小，默认为2（一个处理当前页面，一个预加载下一个页面）
+        """
+        self.context = context
+        self.pool_size = pool_size
+        self.pages = []
+        self.available_pages = threading.Queue()
+        self.lock = threading.Lock()
+        
+        # 创建页面池
+        for i in range(pool_size):
+            page = context.new_page()
+            self.pages.append(page)
+            self.available_pages.put(page)
+        
+        logger.info(f"创建页面池，大小: {pool_size}")
+    
+    def get_page(self):
+        """获取一个可用页面"""
+        return self.available_pages.get()
+    
+    def return_page(self, page):
+        """归还页面到池中"""
+        # 清理页面状态（移除所有监听器，清理cookies等）
+        try:
+            # 清理页面监听器
+            page.remove_all_listeners()
+            # 清理路由
+            page.unroute_all()
+        except Exception as e:
+            logger.debug(f"清理页面状态时出错: {e}")
+        
+        self.available_pages.put(page)
+    
+    def close_all(self):
+        """关闭所有页面"""
+        with self.lock:
+            # 清空队列并关闭所有页面
+            while not self.available_pages.empty():
+                try:
+                    page = self.available_pages.get_nowait()
+                    page.close()
+                except Exception as e:
+                    logger.debug(f"关闭页面时出错: {e}")
+            
+            # 关闭剩余页面
+            for page in self.pages:
+                try:
+                    page.close()
+                except Exception as e:
+                    logger.debug(f"关闭页面时出错: {e}")
+            
+            self.pages.clear()
+            logger.info("页面池已关闭")
 
 @dataclass
 class TimeoutConfig:
@@ -738,7 +804,7 @@ def _generate_pdf_from_page(page, verbose_mode, timeout_config, temp_dir: str, u
         logger.error(f"生成PDF失败: {pdf_err}")
         return None
 
-def process_page_with_failure_tracking(context, url, content_selector, toc_selector, base_url, timeout_config: TimeoutConfig, 
+def process_page_with_failure_tracking(page, url, content_selector, toc_selector, base_url, timeout_config: TimeoutConfig, 
                 max_retries, debug_mode=False, debug_dir=None, verbose_mode=False, load_strategy="normal", 
                 url_blacklist_patterns=None, temp_dir=None):
     """处理单个页面并生成PDF，同时提取该页面内的链接，包含失败跟踪"""
@@ -751,7 +817,6 @@ def process_page_with_failure_tracking(context, url, content_selector, toc_selec
             # 仍然需要提取链接，所以继续处理，但跳过PDF生成
             pass
     
-    page = context.new_page()
     pdf_path = None
     links = []
     final_url = url
@@ -806,20 +871,13 @@ def process_page_with_failure_tracking(context, url, content_selector, toc_selec
         failure_reason = f"处理页面异常: {str(e)}"
         logger.error(f"处理页面失败: {url}\n错误: {str(e)}", exc_info=True)
         return None, links, final_url, failure_reason
-    
-    finally:
-        try:
-            page.close()
-            logger.info(f"已关闭页面: {url}")
-        except Exception as close_err:
-            logger.warning(f"关闭页面时出错: {str(close_err)}")
 
-def process_page(context, url, content_selector, toc_selector, base_url, timeout_config: TimeoutConfig, 
+def process_page(page, url, content_selector, toc_selector, base_url, timeout_config: TimeoutConfig, 
                 max_retries, debug_mode=False, debug_dir=None, verbose_mode=False, load_strategy="normal", 
                 url_blacklist_patterns=None, temp_dir=None):
     """处理单个页面并生成PDF，同时提取该页面内的链接"""
     pdf_path, links, final_url, _ = process_page_with_failure_tracking(
-        context, url, content_selector, toc_selector, base_url, timeout_config,
+        page, url, content_selector, toc_selector, base_url, timeout_config,
         max_retries, debug_mode, debug_dir, verbose_mode, load_strategy, url_blacklist_patterns, temp_dir
     )
     return pdf_path, links, final_url
@@ -901,92 +959,122 @@ def _crawl_pages_with_progress(context, args, base_url_normalized, url_pattern, 
         progress_state.temp_dir = tempfile.mkdtemp(prefix='site_to_pdf_')
         logger.info(f"创建临时目录: {progress_state.temp_dir}")
     
-    processed_count = len(progress_state.visited_urls)  # 已处理的URL数量
+    # 根据并行页面数量创建页面池或单页面
+    if args.parallel_pages > 1:
+        page_pool = PagePool(context, args.parallel_pages)
+        logger.info(f"启用并行处理模式，并行页面数: {args.parallel_pages}")
+        use_pool = True
+    else:
+        # 单页面模式：创建一个持久的页面，重用以提高性能
+        page = context.new_page()
+        logger.info("启用串行处理模式，创建持久页面用于重用")
+        use_pool = False
     
-    while progress_state.queue:
-        url, depth = progress_state.queue.popleft()
-        processed_count += 1
+    try:
+        processed_count = len(progress_state.visited_urls)  # 已处理的URL数量
         
-        # 显示进度信息
-        total_discovered = len(progress_state.enqueued)
-        progress_info = f"进度: [{processed_count}/{total_discovered}]"
-        if len(progress_state.queue) > 0:
-            progress_info += f" (队列中还有 {len(progress_state.queue)} 个)"
-        
-        logger.info(f"{progress_info} 处理: {url} (深度: {depth})")
-        
-        if depth > args.max_depth:
-            logger.warning(f"超过最大深度限制({args.max_depth})，跳过: {url}")
-            continue
+        while progress_state.queue:
+            url, depth = progress_state.queue.popleft()
+            processed_count += 1
             
-        if url in progress_state.visited_urls:
-            logger.info(f"已访问过，跳过: {url}")
-            continue
+            # 显示进度信息
+            total_discovered = len(progress_state.enqueued)
+            progress_info = f"进度: [{processed_count}/{total_discovered}]"
+            if len(progress_state.queue) > 0:
+                progress_info += f" (队列中还有 {len(progress_state.queue)} 个)"
             
-        try:
-            pdf_path, links, final_url, failure_reason = process_page_with_failure_tracking(
-                context, 
-                url, 
-                args.content_selector, 
-                args.toc_selector,
-                base_url_normalized,
-                timeout_config,  # 传递超时配置对象
-                args.max_retries,
-                args.debug,
-                args.debug_dir,
-                args.verbose,
-                args.load_strategy,
-                url_blacklist_patterns,  # 传递URL黑名单模式
-                progress_state.temp_dir  # 传递临时目录
-            )
+            logger.info(f"{progress_info} 处理: {url} (深度: {depth})")
             
-            progress_state.visited_urls.add(url)
-            progress_state.visited_urls.add(final_url)
+            if depth > args.max_depth:
+                logger.warning(f"超过最大深度限制({args.max_depth})，跳过: {url}")
+                continue
+                
+            if url in progress_state.visited_urls:
+                logger.info(f"已访问过，跳过: {url}")
+                continue
             
-            if pdf_path and pdf_path.exists():
-                progress_state.pdf_files.append(pdf_path)
-                progress_state.processed_urls.append(url)
-                logger.info(f"✅ 成功生成PDF: {pdf_path}")
-            else:
-                if failure_reason:
-                    progress_state.failed_urls.append((url, failure_reason))
-                    logger.warning(f"❌ 页面处理失败，记录待重试: {url} - {failure_reason}")
+            # 获取页面（从池中或使用单页面）
+            current_page = page_pool.get_page() if use_pool else page
+            
+            try:
+                pdf_path, links, final_url, failure_reason = process_page_with_failure_tracking(
+                    current_page,  # 传递页面
+                    url, 
+                    args.content_selector, 
+                    args.toc_selector,
+                    base_url_normalized,
+                    timeout_config,  # 传递超时配置对象
+                    args.max_retries,
+                    args.debug,
+                    args.debug_dir,
+                    args.verbose,
+                    args.load_strategy,
+                    url_blacklist_patterns,  # 传递URL黑名单模式
+                    progress_state.temp_dir  # 传递临时目录
+                )
+                
+                progress_state.visited_urls.add(url)
+                progress_state.visited_urls.add(final_url)
+                
+                if pdf_path and pdf_path.exists():
+                    progress_state.pdf_files.append(pdf_path)
+                    progress_state.processed_urls.append(url)
+                    logger.info(f"✅ 成功生成PDF: {pdf_path}")
                 else:
-                    logger.warning(f"❌ 页面未生成PDF: {url}")
-            
-            # 处理新发现的链接
-            new_links_count = 0
-            for link in links:
-                if not link:
-                    continue
+                    if failure_reason:
+                        progress_state.failed_urls.append((url, failure_reason))
+                        logger.warning(f"❌ 页面处理失败，记录待重试: {url} - {failure_reason}")
+                    else:
+                        logger.warning(f"❌ 页面未生成PDF: {url}")
+                
+                # 处理新发现的链接
+                new_links_count = 0
+                for link in links:
+                    if not link:
+                        continue
+                        
+                    norm_url = normalize_url(link, base_url_normalized)
                     
-                norm_url = normalize_url(link, base_url_normalized)
+                    if not url_pattern.match(norm_url):
+                        logger.debug(f"跳过不符合模式的URL: {norm_url}")
+                        continue
+                    
+                    if norm_url in progress_state.visited_urls or norm_url in progress_state.enqueued:
+                        logger.debug(f"已存在，跳过URL: {norm_url}")
+                        continue
+                    
+                    logger.info(f"🔗 添加新URL到队列: {norm_url} (深度: {depth+1})")
+                    progress_state.queue.append((norm_url, depth + 1))
+                    progress_state.enqueued.add(norm_url)
+                    new_links_count += 1
                 
-                if not url_pattern.match(norm_url):
-                    logger.debug(f"跳过不符合模式的URL: {norm_url}")
-                    continue
+                if new_links_count > 0:
+                    logger.info(f"📊 从当前页面发现 {new_links_count} 个新链接，队列总数: {len(progress_state.queue)}")
                 
-                if norm_url in progress_state.visited_urls or norm_url in progress_state.enqueued:
-                    logger.debug(f"已存在，跳过URL: {norm_url}")
-                    continue
+                # 每处理一个URL就保存进度
+                progress_state.save_to_file()
                 
-                logger.info(f"🔗 添加新URL到队列: {norm_url} (深度: {depth+1})")
-                progress_state.queue.append((norm_url, depth + 1))
-                progress_state.enqueued.add(norm_url)
-                new_links_count += 1
-            
-            if new_links_count > 0:
-                logger.info(f"📊 从当前页面发现 {new_links_count} 个新链接，队列总数: {len(progress_state.queue)}")
-            
-            # 每处理一个URL就保存进度
-            progress_state.save_to_file()
-            
-        except Exception as e:
-            logger.exception(f"处理 {url} 时发生错误")
-            progress_state.failed_urls.append((url, f"异常错误: {str(e)}"))
-            progress_state.visited_urls.add(url)
-            # 即使出错也要保存进度
-            progress_state.save_to_file()
+            except Exception as e:
+                logger.exception(f"处理 {url} 时发生错误")
+                progress_state.failed_urls.append((url, f"异常错误: {str(e)}"))
+                progress_state.visited_urls.add(url)
+                # 即使出错也要保存进度
+                progress_state.save_to_file()
+            finally:
+                # 归还页面到池中（如果使用页面池）
+                if use_pool:
+                    page_pool.return_page(current_page)
+        
+    finally:
+        # 确保页面或页面池被正确关闭
+        if use_pool:
+            page_pool.close_all()
+        else:
+            try:
+                page.close()
+                logger.info("已关闭重用的页面")
+            except Exception as close_err:
+                logger.warning(f"关闭重用页面时出错: {str(close_err)}")
     
     # 最终统计
     success_count = len(progress_state.processed_urls)
@@ -1068,46 +1156,59 @@ def _interactive_retry_failed_urls(context, failed_urls, args, base_url_normaliz
     
     logger.info(f"开始重试 {len(urls_to_retry)} 个失败的URL，重试次数: {retry_count}")
     
-    retry_pdf_files = []
-    retry_processed_urls = []
-    still_failed_urls = []
+    # 创建重试专用页面
+    retry_page = context.new_page()
+    logger.info("为重试创建专用页面")
     
-    for i, url in enumerate(urls_to_retry, 1):
-        logger.info(f"🔄 重试进度: [{i}/{len(urls_to_retry)}] 处理: {url}")
-        success = False
+    try:
+        retry_pdf_files = []
+        retry_processed_urls = []
+        still_failed_urls = []
         
-        for attempt in range(retry_count):
-            try:
-                pdf_path, _, final_url, failure_reason = process_page_with_failure_tracking(
-                    context, 
-                    url, 
-                    args.content_selector, 
-                    args.toc_selector,
-                    base_url_normalized,
-                    timeout_config,
-                    args.max_retries,
-                    args.debug,
-                    args.debug_dir,
-                    args.verbose,
-                    args.load_strategy,
-                    []  # 重试时不应用黑名单，可能之前被误拦
-                )
-                
-                if pdf_path and pdf_path.exists():
-                    retry_pdf_files.append(pdf_path)
-                    retry_processed_urls.append(url)
-                    logger.info(f"✅ 重试成功: {url}")
-                    success = True
-                    break
-                else:
-                    logger.warning(f"⚠️ 重试第 {attempt + 1}/{retry_count} 次失败: {url} - {failure_reason}")
+        for i, url in enumerate(urls_to_retry, 1):
+            logger.info(f"🔄 重试进度: [{i}/{len(urls_to_retry)}] 处理: {url}")
+            success = False
+            
+            for attempt in range(retry_count):
+                try:
+                    pdf_path, _, final_url, failure_reason = process_page_with_failure_tracking(
+                        retry_page,  # 使用重试专用页面
+                        url, 
+                        args.content_selector, 
+                        args.toc_selector,
+                        base_url_normalized,
+                        timeout_config,
+                        args.max_retries,
+                        args.debug,
+                        args.debug_dir,
+                        args.verbose,
+                        args.load_strategy,
+                        []  # 重试时不应用黑名单，可能之前被误拦
+                    )
                     
-            except Exception as e:
-                logger.warning(f"⚠️ 重试第 {attempt + 1}/{retry_count} 次异常: {url} - {str(e)}")
+                    if pdf_path and pdf_path.exists():
+                        retry_pdf_files.append(pdf_path)
+                        retry_processed_urls.append(url)
+                        logger.info(f"✅ 重试成功: {url}")
+                        success = True
+                        break
+                    else:
+                        logger.warning(f"⚠️ 重试第 {attempt + 1}/{retry_count} 次失败: {url} - {failure_reason}")
+                        
+                except Exception as e:
+                    logger.warning(f"⚠️ 重试第 {attempt + 1}/{retry_count} 次异常: {url} - {str(e)}")
+            
+            if not success:
+                still_failed_urls.append((url, "重试后仍然失败"))
+                logger.error(f"❌ 重试所有次数后仍然失败: {url}")
         
-        if not success:
-            still_failed_urls.append((url, "重试后仍然失败"))
-            logger.error(f"❌ 重试所有次数后仍然失败: {url}")
+    finally:
+        # 确保重试页面被正确关闭
+        try:
+            retry_page.close()
+            logger.info("已关闭重试专用页面")
+        except Exception as close_err:
+            logger.warning(f"关闭重试页面时出错: {str(close_err)}")
     
     # 重试结果统计
     retry_success_count = len(retry_processed_urls)
@@ -1227,6 +1328,8 @@ def main():
                        help="自动恢复之前中断的爬取任务（如果存在）")
     parser.add_argument("--cleanup", action="store_true", 
                        help="清理指定URL和输出文件对应的临时文件和进度文件")
+    parser.add_argument("--parallel-pages", type=int, default=2, choices=[1, 2, 3, 4],
+                       help="并行页面数量 (1-4)，提高处理速度但会增加内存使用。1=串行处理，2+=并行处理")
     args = parser.parse_args()
     
     # 处理清理命令
