@@ -484,14 +484,15 @@ def _setup_request_blocking(page, patterns):
 def _setup_slow_request_monitoring(page, timeout_config: TimeoutConfig):
     """设置慢请求监控，打印请求时间超过超时时间1/5的链接"""
     slow_requests = {}
-    
+    warned_slow_failed_urls = set()
+
     # 使用配置的慢请求阈值
     slow_threshold = timeout_config.slow_request_threshold
     logger.info(f"启用请求监控，慢请求阈值: {slow_threshold:.1f}秒 (超时时间的1/5)")
-    
+
     def on_request(request):
         slow_requests[request.url] = time.time()
-    
+
     def on_response(response):
         request_url = response.url
         if request_url in slow_requests:
@@ -499,19 +500,21 @@ def _setup_slow_request_monitoring(page, timeout_config: TimeoutConfig):
             if duration > slow_threshold:
                 logger.warning(f"⏰ 请求过久 ({duration:.1f}s > {slow_threshold:.1f}s): {request_url}")
             del slow_requests[request_url]
-    
+
     def on_request_failed(request):
         request_url = request.url
         if request_url in slow_requests:
             duration = time.time() - slow_requests[request_url]
-            if duration > slow_threshold:
+            # 去重：只对每个URL记录一次慢请求失败日志
+            if duration > slow_threshold and request_url not in warned_slow_failed_urls:
                 logger.warning(f"⏰ 请求失败前耗时过久 ({duration:.1f}s > {slow_threshold:.1f}s): {request_url}")
+                warned_slow_failed_urls.add(request_url)
             del slow_requests[request_url]
-    
+
     page.on("request", on_request)
     page.on("response", on_response)
     page.on("requestfailed", on_request_failed)
-    
+
     return slow_requests
 
 def _handle_page_loading_with_retries(page, url, content_selector, timeout_config, max_retries, 
