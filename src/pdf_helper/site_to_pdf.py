@@ -78,6 +78,11 @@ class TimeoutConfig:
     def min_pdf_size(self) -> int:
         """最小PDF文件大小（字节）"""
         return 5000
+    
+    @property
+    def slow_request_threshold(self) -> float:
+        """慢请求阈值（超时时间的1/5）"""
+        return self.base_timeout / 5.0
 
 @dataclass
 class ProgressState:
@@ -379,9 +384,13 @@ def _setup_request_blocking(page, patterns):
     
     page.route("**/*", handle_route)
 
-def _setup_slow_request_monitoring(page):
-    """设置慢请求监控（仅用于thorough模式）"""
+def _setup_slow_request_monitoring(page, timeout_config: TimeoutConfig):
+    """设置慢请求监控，打印请求时间超过超时时间1/5的链接"""
     slow_requests = {}
+    
+    # 使用配置的慢请求阈值
+    slow_threshold = timeout_config.slow_request_threshold
+    logger.info(f"启用请求监控，慢请求阈值: {slow_threshold:.1f}秒 (超时时间的1/5)")
     
     def on_request(request):
         slow_requests[request.url] = time.time()
@@ -390,13 +399,17 @@ def _setup_slow_request_monitoring(page):
         request_url = response.url
         if request_url in slow_requests:
             duration = time.time() - slow_requests[request_url]
-            if duration > 3.0:  # 超过3秒的请求
-                logger.warning(f"加载缓慢的资源 ({duration:.1f}s): {request_url}")
+            if duration > slow_threshold:
+                logger.warning(f"⏰ 请求过久 ({duration:.1f}s > {slow_threshold:.1f}s): {request_url}")
             del slow_requests[request_url]
     
     def on_request_failed(request):
-        if request.url in slow_requests:
-            del slow_requests[request.url]
+        request_url = request.url
+        if request_url in slow_requests:
+            duration = time.time() - slow_requests[request_url]
+            if duration > slow_threshold:
+                logger.warning(f"⏰ 请求失败前耗时过久 ({duration:.1f}s > {slow_threshold:.1f}s): {request_url}")
+            del slow_requests[request_url]
     
     page.on("request", on_request)
     page.on("response", on_response)
@@ -425,10 +438,18 @@ def _handle_page_loading_with_retries(page, url, content_selector, timeout_confi
                 logger.warning("网络空闲等待超时，继续等待元素可见")
                 # 在thorough模式下，打印还在加载的慢请求
                 if slow_requests:
-                    logger.warning(f"仍有 {len(slow_requests)} 个请求未完成:")
-                    for req_url in list(slow_requests.keys())[:5]:  # 只显示前5个
-                        duration = time.time() - slow_requests[req_url]
-                        logger.warning(f"  - {duration:.1f}s: {req_url}")
+                    current_time = time.time()
+                    ongoing_requests = []
+                    for req_url, start_time in slow_requests.items():
+                        duration = current_time - start_time
+                        ongoing_requests.append((req_url, duration))
+                    
+                    if ongoing_requests:
+                        # 按持续时间排序，显示最慢的前5个
+                        ongoing_requests.sort(key=lambda x: x[1], reverse=True)
+                        logger.warning(f"仍有 {len(ongoing_requests)} 个请求未完成:")
+                        for req_url, duration in ongoing_requests[:5]:
+                            logger.warning(f"  - {duration:.1f}s: {req_url}")
             
             # 然后等待元素可见（使用剩余时间）
             remaining_timeout = max(timeout_config.base_timeout // 2, timeout_config.thorough_min_timeout)
@@ -441,10 +462,8 @@ def _handle_page_loading_with_retries(page, url, content_selector, timeout_confi
     # 设置请求拦截
     _setup_request_blocking(page, url_blacklist_patterns)
     
-    # 设置慢请求监控（仅在thorough模式下）
-    slow_requests = None
-    if load_strategy == "thorough":
-        slow_requests = _setup_slow_request_monitoring(page)
+    # 为所有策略启用慢请求监控
+    slow_requests = _setup_slow_request_monitoring(page, timeout_config)
     
     for attempt in range(max_retries):
         try:
