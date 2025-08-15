@@ -1249,6 +1249,107 @@ def _crawl_pages_serial(context, args, base_url_normalized, url_pattern, url_bla
     
     return progress_state
 
+def _check_qos_trigger(loading_tasks, qos_failure_tracker):
+    """检查是否触发QoS等待条件"""
+    # 检查当前活跃任务中有多少已经失败过
+    failed_tasks_in_current_batch = 0
+    
+    for task_id in loading_tasks:
+        if task_id in qos_failure_tracker:
+            failed_tasks_in_current_batch += 1
+    
+    # 如果当前批次中超过一半的任务都失败过，认为触发了流控
+    total_active_tasks = len(loading_tasks)
+    if total_active_tasks >= 2 and failed_tasks_in_current_batch >= total_active_tasks // 2:
+        return True
+    
+    return False
+
+def _perform_qos_wait(qos_wait_seconds):
+    """执行QoS等待"""
+    logger.warning(f"🚨 检测到可能的网站流控，进入QoS等待模式")
+    logger.info(f"⏰ 等待 {qos_wait_seconds} 秒（{qos_wait_seconds//60:.1f} 分钟）以避免流控...")
+    
+    # 分段显示等待进度
+    wait_interval = min(30, qos_wait_seconds // 10)  # 每30秒或总时间的1/10显示一次进度
+    elapsed = 0
+    
+    while elapsed < qos_wait_seconds:
+        remaining = qos_wait_seconds - elapsed
+        if remaining <= wait_interval:
+            time.sleep(remaining)
+            break
+        else:
+            time.sleep(wait_interval)
+            elapsed += wait_interval
+            progress_percent = (elapsed / qos_wait_seconds) * 100
+            logger.info(f"⏰ QoS等待进度: {progress_percent:.1f}% ({elapsed}/{qos_wait_seconds}秒)")
+    
+    logger.info("✅ QoS等待完成，恢复正常处理")
+
+def _track_task_failure(task_id, qos_failure_tracker):
+    """记录任务失败，用于QoS检测"""
+    qos_failure_tracker.add(task_id)
+    logger.debug(f"记录任务 #{task_id} 失败，当前失败任务数: {len(qos_failure_tracker)}")
+
+def _process_completed_task_with_qos(pipeline_pool, loading_tasks, completed_task_id, progress_state, 
+                                   args, base_url_normalized, url_pattern, timeout_config, qos_failure_tracker):
+    """处理已完成的任务，包含QoS失败跟踪"""
+    if completed_task_id not in loading_tasks:
+        return False
+    
+    url, depth = loading_tasks[completed_task_id]
+    page, final_url, error = pipeline_pool.get_loaded_page(completed_task_id, timeout=0.1)
+    
+    # 显示进度信息
+    processed_count = len(progress_state.visited_urls) + 1
+    total_discovered = len(progress_state.enqueued)
+    remaining_in_queue = len(progress_state.queue)
+    active_loading = len(loading_tasks) - 1  # 减去当前正在处理的
+    progress_info = f"流水线进度: [{processed_count}/{total_discovered}]"
+    if remaining_in_queue > 0 or active_loading > 0:
+        progress_info += f" (队列: {remaining_in_queue}, 预加载中: {active_loading})"
+    
+    logger.info(f"{progress_info} 处理: {url} (深度: {depth})")
+    
+    task_failed = False
+    
+    if depth > args.max_depth:
+        logger.warning(f"超过最大深度限制({args.max_depth})，跳过: {url}")
+    elif url in progress_state.visited_urls:
+        logger.info(f"已访问过，跳过: {url}")
+    elif page is not None:
+        # 页面加载成功，进行内容处理
+        try:
+            pdf_path, links = _process_loaded_page(
+                page, url, final_url or url, args, base_url_normalized, timeout_config,
+                progress_state.temp_dir
+            )
+            
+            _handle_page_result(
+                progress_state, url, final_url or url, pdf_path, links, None,
+                url_pattern, base_url_normalized, depth, args.max_depth
+            )
+            
+        except Exception as e:
+            logger.exception(f"处理已加载页面 {url} 时发生错误")
+            progress_state.failed_urls.append((url, f"处理异常: {str(e)}"))
+            progress_state.visited_urls.add(url)
+            task_failed = True
+    else:
+        # 页面加载失败
+        failure_reason = error or "页面加载失败"
+        logger.warning(f"页面加载失败: {url} - {failure_reason}")
+        progress_state.failed_urls.append((url, failure_reason))
+        progress_state.visited_urls.add(url)
+        task_failed = True
+    
+    # 记录任务失败用于QoS检测
+    if task_failed:
+        _track_task_failure(completed_task_id, qos_failure_tracker)
+    
+    return task_failed
+
 def _start_initial_loading_tasks(pipeline_pool, progress_state, args, timeout_config, url_blacklist_patterns):
     """启动初始页面预加载任务"""
     loading_tasks = {}  # {task_id: (url, depth)}
@@ -1354,9 +1455,14 @@ def _crawl_pages_pipeline(context, args, base_url_normalized, url_pattern, url_b
                          timeout_config, progress_state: ProgressState):
     """流水线并行处理模式"""
     logger.info(f"启用流水线并行处理模式，并行度: {args.parallel_pages}")
+    logger.info(f"QoS等待时间: {args.qos_wait} 秒（{args.qos_wait//60:.1f} 分钟）")
     
     # 创建流水线页面池
     pipeline_pool = PipelinePagePool(context, args.parallel_pages)
+    
+    # QoS失败跟踪器和统计
+    qos_failure_tracker = set()  # 记录失败过的任务ID
+    qos_wait_count = 0  # QoS等待触发次数
     
     try:
         # 启动初始页面预加载
@@ -1366,13 +1472,22 @@ def _crawl_pages_pipeline(context, args, base_url_normalized, url_pattern, url_b
         
         # 流水线处理循环
         while loading_tasks:
+            # 检查是否需要QoS等待
+            if _check_qos_trigger(loading_tasks, qos_failure_tracker):
+                logger.warning(f"检测到多个并行任务失败，可能触发网站流控")
+                _perform_qos_wait(args.qos_wait)
+                qos_wait_count += 1
+                # 清空失败跟踪器，重新开始统计
+                qos_failure_tracker.clear()
+                logger.info("QoS等待后重新开始任务跟踪")
+            
             # 选择一个已完成加载的任务进行处理
             completed_task_id = _find_completed_task(pipeline_pool, loading_tasks)
             
-            # 处理已完成的任务
-            _process_completed_task(
+            # 处理已完成的任务（包含QoS失败跟踪）
+            task_failed = _process_completed_task_with_qos(
                 pipeline_pool, loading_tasks, completed_task_id, progress_state,
-                args, base_url_normalized, url_pattern, timeout_config
+                args, base_url_normalized, url_pattern, timeout_config, qos_failure_tracker
             )
             
             # 清理已完成的任务
@@ -1401,6 +1516,9 @@ def _crawl_pages_pipeline(context, args, base_url_normalized, url_pattern, url_b
         logger.info(f"   总共处理: {total_processed} 个URL")
         logger.info(f"   成功: {success_count} 个 ({success_count/total_processed*100:.1f}%)")
         logger.info(f"   失败: {failed_count} 个 ({failed_count/total_processed*100:.1f}%)")
+        if qos_wait_count > 0:
+            total_qos_wait_time = qos_wait_count * args.qos_wait
+            logger.info(f"   QoS等待: {qos_wait_count} 次 (总计 {total_qos_wait_time//60:.1f} 分钟)")
     
     return progress_state
 
@@ -1728,6 +1846,8 @@ def _create_argument_parser():
                        help="清理指定URL和输出文件对应的临时文件和进度文件")
     parser.add_argument("--parallel-pages", type=int, default=2, choices=[1, 2, 3, 4],
                        help="并行页面数量 (1-4)，提高处理速度但会增加内存使用。1=串行处理，2+=并行处理")
+    parser.add_argument("--qos-wait", type=int, default=600, 
+                       help="QoS等待时间（秒），当检测到多个并行任务都失败时，等待指定时间以避免触发网站流控，默认600秒（10分钟）")
     return parser
 
 def _handle_cleanup_command(args):
