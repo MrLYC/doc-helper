@@ -901,35 +901,50 @@ def _handle_page_loading_with_retries(
     raise Exception("所有重试均失败")
 
 
-def _extract_page_links(page, toc_selector, final_url, base_url):
-    """提取页面中的导航链接"""
-    links = []
-    try:
-        logger.info(f"开始提取导航链接: {toc_selector}")
-        resolved_toc = resolve_selector(toc_selector)
+def _extract_page_links(page, toc_selectors, final_url, base_url):
+    """提取页面中的导航链接，支持多个目录选择器"""
+    all_links = []
+    
+    # 如果传入的是字符串，转换为列表
+    if isinstance(toc_selectors, str):
+        toc_selectors = [toc_selectors]
+    
+    logger.info(f"开始提取导航链接，尝试 {len(toc_selectors)} 个目录选择器")
+    
+    for i, toc_selector in enumerate(toc_selectors, 1):
+        try:
+            logger.info(f"尝试目录选择器 {i}/{len(toc_selectors)}: {toc_selector}")
+            resolved_toc = resolve_selector(toc_selector)
 
-        toc_element = page.query_selector(resolved_toc)
-        if not toc_element:
-            logger.warning(f"导航元素不存在: {resolved_toc}")
-            return links
+            toc_element = page.query_selector(resolved_toc)
+            if not toc_element:
+                logger.debug(f"目录选择器 {i} 未找到元素: {resolved_toc}")
+                continue
 
-        a_elements = toc_element.query_selector_all("a")
-        logger.info(f"找到 {len(a_elements)} 个链接元素")
+            a_elements = toc_element.query_selector_all("a")
+            logger.info(f"目录选择器 {i} 找到 {len(a_elements)} 个链接元素")
 
-        for a in a_elements:
-            href = a.get_attribute("href")
-            if href and href.strip():
-                abs_url = urljoin(final_url, href.strip())
-                norm_url = normalize_url(abs_url, base_url)
-                links.append(norm_url)
+            links_from_selector = []
+            for a in a_elements:
+                href = a.get_attribute("href")
+                if href and href.strip():
+                    abs_url = urljoin(final_url, href.strip())
+                    norm_url = normalize_url(abs_url, base_url)
+                    links_from_selector.append(norm_url)
 
-        links = list(set(links))
-        logger.info(f"提取到 {len(links)} 个唯一链接")
+            unique_links_from_selector = list(set(links_from_selector))
+            logger.info(f"目录选择器 {i} 提取到 {len(unique_links_from_selector)} 个唯一链接")
+            all_links.extend(unique_links_from_selector)
 
-    except Exception as e:
-        logger.error(f"提取导航链接失败: {e}", exc_info=True)
+        except Exception as e:
+            logger.warning(f"目录选择器 {i} 提取链接失败: {e}")
+            continue
 
-    return links
+    # 去重所有链接
+    unique_links = list(set(all_links))
+    logger.info(f"总共从所有目录选择器提取到 {len(unique_links)} 个唯一链接")
+
+    return unique_links
 
 
 def _clean_page_content(page, content_element, verbose_mode, timeout_config):
@@ -1201,7 +1216,7 @@ def process_page_with_failure_tracking(
     page,
     url,
     content_selector,
-    toc_selector,
+    toc_selectors,
     base_url,
     timeout_config: TimeoutConfig,
     max_retries,
@@ -1248,7 +1263,7 @@ def process_page_with_failure_tracking(
             logger.info(f"重定向: {url} -> {final_url}")
 
         # 提取页面链接
-        links = _extract_page_links(page, toc_selector, final_url, base_url)
+        links = _extract_page_links(page, toc_selectors, final_url, base_url)
 
         # 如果PDF已存在，直接返回
         if existing_pdf:
@@ -1282,7 +1297,7 @@ def process_page(
     page,
     url,
     content_selector,
-    toc_selector,
+    toc_selectors,
     base_url,
     timeout_config: TimeoutConfig,
     max_retries,
@@ -1298,7 +1313,7 @@ def process_page(
         page,
         url,
         content_selector,
-        toc_selector,
+        toc_selectors,
         base_url,
         timeout_config,
         max_retries,
@@ -2276,7 +2291,7 @@ def _create_argument_parser():
     # 必填参数 - 添加短参数
     parser.add_argument("-u", "--base-url", required=True, help="起始URL")
     parser.add_argument("-c", "--content-selector", required=True, help="内容容器选择器")
-    parser.add_argument("-t", "--toc-selector", required=True, help="链接提取选择器")
+    parser.add_argument("-t", "--toc-selector", action="append", required=True, help="链接提取选择器，可指定多个")
     parser.add_argument("-o", "--output-pdf", required=True, help="输出PDF路径")
 
     # URL过滤相关参数
