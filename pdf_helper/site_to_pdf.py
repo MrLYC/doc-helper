@@ -948,7 +948,8 @@ def _extract_page_links(page, toc_selectors, final_url, base_url):
             links_from_selector = []
             
             # 检查选中的元素本身是否是 a 标签
-            if toc_element.tag_name.lower() == 'a':
+            tag_name = toc_element.evaluate("element => element.tagName.toLowerCase()")
+            if tag_name == 'a':
                 href = toc_element.get_attribute("href")
                 if href and href.strip():
                     abs_url = urljoin(final_url, href.strip())
