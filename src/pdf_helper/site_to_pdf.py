@@ -18,6 +18,7 @@ import signal
 import sys
 import os
 import threading
+import queue
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from PyPDF2 import PdfMerger, PdfReader
@@ -46,7 +47,7 @@ class PagePool:
         self.context = context
         self.pool_size = pool_size
         self.pages = []
-        self.available_pages = threading.Queue()
+        self.available_pages = queue.Queue()
         self.lock = threading.Lock()
         
         # 创建页面池
