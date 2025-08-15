@@ -227,8 +227,8 @@ class TimeoutConfig:
     
     @property
     def slow_request_threshold(self) -> float:
-        """慢请求阈值（超时时间的1/5）"""
-        return self.base_timeout / 5.0
+        """慢请求阈值（超时时间的1/10）"""
+        return self.base_timeout / 10.0
 
 @dataclass
 class ProgressState:
@@ -1711,14 +1711,14 @@ def _create_argument_parser():
     parser.add_argument("--toc-selector", required=True, help="链接提取选择器")
     parser.add_argument("--output-pdf", required=True, help="输出PDF路径")
     parser.add_argument("--max-page", type=int, default=10000, help="单PDF最大页数")
-    parser.add_argument("--timeout", type=int, default=60, help="页面加载超时时间（秒）")
+    parser.add_argument("--timeout", type=int, default=120, help="页面加载超时时间（秒）")
     parser.add_argument("--max-depth", type=int, default=10, help="最大爬取深度")
     parser.add_argument("--max-retries", type=int, default=3, help="失败重试次数")
     parser.add_argument("--debug", action="store_true", help="启用调试模式，保存页面截图")
     parser.add_argument("--debug-dir", default="debug_screenshots", help="调试截图保存目录")
     parser.add_argument("--verbose", action="store_true", help="显示浏览器界面，便于观察处理过程")
     parser.add_argument("--fast-load", action="store_true", help="快速加载模式，跳过网络空闲等待")
-    parser.add_argument("--load-strategy", choices=["fast", "normal", "thorough"], default="normal", 
+    parser.add_argument("--load-strategy", choices=["fast", "normal", "thorough"], default="thorough", 
                        help="页面加载策略：fast=仅等待DOM, normal=智能等待, thorough=完全等待网络空闲")
     parser.add_argument("--skip-failed-retry", action="store_true", 
                        help="跳过失败URL的交互式重试，直接处理成功的页面")
