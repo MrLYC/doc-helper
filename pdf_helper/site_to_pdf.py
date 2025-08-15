@@ -191,6 +191,7 @@ class TrueParallelProcessor:
         page_state = self.page_states[slot_index]
         if page_state and page_state.page:
             try:
+                # 添加超时机制，防止页面关闭时卡住
                 page_state.page.close()
                 logger.debug(f"🔄 槽位[{slot_index}] 页面已关闭: {page_state.url}")
             except Exception as e:
@@ -201,7 +202,12 @@ class TrueParallelProcessor:
         """关闭所有页面"""
         logger.info("🔄 正在关闭所有并行页面...")
         for i in range(self.parallel_count):
-            self._close_page_slot(i)
+            try:
+                self._close_page_slot(i)
+            except Exception as e:
+                logger.warning(f"关闭槽位[{i}]时出错: {e}")
+                # 强制清空状态，即使关闭失败
+                self.page_states[i] = None
         logger.info("并行页面处理器已关闭")
 
 
@@ -716,36 +722,54 @@ def _setup_request_blocking(page, patterns):
 
 def _setup_slow_request_monitoring(page, timeout_config: TimeoutConfig):
     """设置慢请求监控，打印请求时间慢请求"""
+    import threading
+    
     slow_requests = {}
+    # 使用线程安全的锁来保护共享数据
+    slow_requests_lock = threading.Lock()
     warned_slow_failed_urls = set()
     warned_slow_response_urls = set()
+    warned_lock = threading.Lock()
 
     # 使用配置的慢请求阈值
     slow_threshold = timeout_config.slow_request_threshold
     logger.info(f"启用请求监控，慢请求阈值: {slow_threshold:.1f}秒")
 
     def on_request(request):
-        slow_requests[request.url] = time.time()
+        with slow_requests_lock:
+            slow_requests[request.url] = time.time()
 
     def on_response(response):
         request_url = response.url
-        if request_url in slow_requests:
-            duration = time.time() - slow_requests[request_url]
-            # 去重：只对每个URL记录一次慢请求日志
-            if duration > slow_threshold and request_url not in warned_slow_response_urls:
-                logger.warning(f"⏰ 请求过久 ({duration:.1f}s > {slow_threshold:.1f}s): {request_url}")
-                warned_slow_response_urls.add(request_url)
-            del slow_requests[request_url]
+        duration = None
+        
+        with slow_requests_lock:
+            if request_url in slow_requests:
+                duration = time.time() - slow_requests[request_url]
+                del slow_requests[request_url]
+        
+        # 检查是否需要警告（在锁外进行，避免死锁）
+        if duration is not None and duration > slow_threshold:
+            with warned_lock:
+                if request_url not in warned_slow_response_urls:
+                    logger.warning(f"⏰ 请求过久 ({duration:.1f}s > {slow_threshold:.1f}s): {request_url}")
+                    warned_slow_response_urls.add(request_url)
 
     def on_request_failed(request):
         request_url = request.url
-        if request_url in slow_requests:
-            duration = time.time() - slow_requests[request_url]
-            # 去重：只对每个URL记录一次慢请求失败日志
-            if duration > slow_threshold and request_url not in warned_slow_failed_urls:
-                logger.warning(f"⏰ 请求失败前耗时过久 ({duration:.1f}s > {slow_threshold:.1f}s): {request_url}")
-                warned_slow_failed_urls.add(request_url)
-            del slow_requests[request_url]
+        duration = None
+        
+        with slow_requests_lock:
+            if request_url in slow_requests:
+                duration = time.time() - slow_requests[request_url]
+                del slow_requests[request_url]
+        
+        # 检查是否需要警告（在锁外进行，避免死锁）
+        if duration is not None and duration > slow_threshold:
+            with warned_lock:
+                if request_url not in warned_slow_failed_urls:
+                    logger.warning(f"⏰ 请求失败前耗时过久 ({duration:.1f}s > {slow_threshold:.1f}s): {request_url}")
+                    warned_slow_failed_urls.add(request_url)
 
     page.on("request", on_request)
     page.on("response", on_response)
@@ -921,16 +945,27 @@ def _extract_page_links(page, toc_selectors, final_url, base_url):
                 logger.debug(f"目录选择器 {i} 未找到元素: {resolved_toc}")
                 continue
 
-            a_elements = toc_element.query_selector_all("a")
-            logger.info(f"目录选择器 {i} 找到 {len(a_elements)} 个链接元素")
-
             links_from_selector = []
-            for a in a_elements:
-                href = a.get_attribute("href")
+            
+            # 检查选中的元素本身是否是 a 标签
+            if toc_element.tag_name.lower() == 'a':
+                href = toc_element.get_attribute("href")
                 if href and href.strip():
                     abs_url = urljoin(final_url, href.strip())
                     norm_url = normalize_url(abs_url, base_url)
                     links_from_selector.append(norm_url)
+                    logger.info(f"目录选择器 {i} 本身是 a 标签，提取到 1 个链接")
+            else:
+                # 在选中的元素内查找 a 标签
+                a_elements = toc_element.query_selector_all("a")
+                logger.info(f"目录选择器 {i} 找到 {len(a_elements)} 个链接元素")
+
+                for a in a_elements:
+                    href = a.get_attribute("href")
+                    if href and href.strip():
+                        abs_url = urljoin(final_url, href.strip())
+                        norm_url = normalize_url(abs_url, base_url)
+                        links_from_selector.append(norm_url)
 
             unique_links_from_selector = list(set(links_from_selector))
             logger.info(f"目录选择器 {i} 提取到 {len(unique_links_from_selector)} 个唯一链接")
@@ -2297,16 +2332,21 @@ def _create_argument_parser():
     # URL过滤相关参数
     parser.add_argument("--url-pattern", default=None, help="URL匹配模式正则表达式")
     parser.add_argument(
-        "--url-blacklist",
+        "-b", "--url-blacklist",
         action="append",
-        default=[],
+        default=[
+            "https://analytics.twitter.com/",
+            "https://connect.facebook.net/",
+            "https://t.co/",
+            "https://www.google-analytics.com/"
+        ],
         help="URL黑名单模式正则表达式，可指定多个，阻止浏览器加载匹配的URL",
     )
     parser.add_argument(
-        "--url-blacklist-auto-threshold",
+        "-B", "--url-blacklist-auto-threshold",
         type=int,
-        default=10,
-        help="自动黑名单阈值，当某个域名出现指定次数的请求异常时，自动加入黑名单，默认10次",
+        default=5,
+        help="自动黑名单阈值，当某个域名出现指定次数的请求异常时，自动加入黑名单",
     )
 
     # 基本配置参数
