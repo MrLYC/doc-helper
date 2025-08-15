@@ -471,22 +471,62 @@ def check_element_visibility_and_content(page, selector: str) -> Tuple[bool, str
     
     return True, "元素可见", element_info['textLength'], element_info
 
+def _get_wait_config(strategy: str, timeout_config):
+    """根据策略获取等待配置"""
+    if strategy == "fast":
+        return timeout_config.fast_mode_timeout, timeout_config.fast_check_interval
+    elif strategy == "thorough":
+        return timeout_config.base_timeout, timeout_config.element_check_interval
+    else:  # normal
+        return timeout_config.base_timeout, timeout_config.element_check_interval
+
+def _log_wait_strategy(strategy: str, timeout: float):
+    """记录等待策略信息"""
+    if strategy == "fast":
+        logger.info(f"快速等待元素可见，最大等待时间 {timeout} 秒")
+    elif strategy == "thorough":
+        logger.info(f"彻底模式：持续等待元素可见，剩余等待时间 {timeout:.1f} 秒")
+    else:  # normal
+        logger.info(f"智能等待模式：持续等待元素可见，最大等待时间 {timeout} 秒")
+
+def _handle_normal_strategy_content(page, selector, text_length, timeout_config, wait_start_time, timeout):
+    """处理normal策略的内容检查逻辑"""
+    if text_length > 100:  # 如果已经有足够内容，直接成功
+        logger.info(f"内容充足 ({text_length} 字符)，完成等待")
+        return True
+    elif text_length > 0:
+        # 有少量内容，再等待一段时间看是否有更多内容加载
+        remaining_time = timeout - (time.time() - wait_start_time)
+        additional_wait = min(remaining_time, timeout_config.content_additional_wait)
+        
+        if additional_wait > 0:
+            logger.info(f"内容较少 ({text_length} 字符)，再等待 {additional_wait:.1f} 秒看是否有更多内容...")
+            time.sleep(additional_wait)
+            
+            # 再次检查
+            is_ready_again, _, text_length_again, _ = check_element_visibility_and_content(page, selector)
+            if is_ready_again and text_length_again >= text_length:
+                logger.info(f"内容已更新到 {text_length_again} 字符，接受当前状态")
+            else:
+                logger.info(f"内容无明显增加，接受当前状态 ({text_length} 字符)")
+        
+        return True
+    else:
+        logger.info("元素可见但无文本内容，继续等待...")
+        return False
+
+def _check_consecutive_failures(status_msg, consecutive_failures, max_consecutive_failures):
+    """检查连续失败是否需要快速失败"""
+    if "元素不存在" in status_msg and consecutive_failures >= max_consecutive_failures:
+        logger.warning(f"元素连续 {consecutive_failures} 次不存在，可能是外部链接或无效页面，快速失败")
+        return True
+    return False
+
 def wait_for_element_visible(page, selector: str, timeout_config: TimeoutConfig, 
                            strategy: str = "normal") -> bool:
     """等待元素可见的通用函数"""
-    if strategy == "fast":
-        timeout = timeout_config.fast_mode_timeout
-        check_interval = timeout_config.fast_check_interval
-        logger.info(f"快速等待元素可见，最大等待时间 {timeout} 秒")
-    elif strategy == "thorough":
-        # thorough模式由调用方计算剩余时间
-        timeout = timeout_config.base_timeout  
-        check_interval = timeout_config.element_check_interval
-        logger.info(f"彻底模式：持续等待元素可见，剩余等待时间 {timeout:.1f} 秒")
-    else:  # normal
-        timeout = timeout_config.base_timeout
-        check_interval = timeout_config.element_check_interval
-        logger.info(f"智能等待模式：持续等待元素可见，最大等待时间 {timeout} 秒")
+    timeout, check_interval = _get_wait_config(strategy, timeout_config)
+    _log_wait_strategy(strategy, timeout)
     
     wait_start_time = time.time()
     consecutive_failures = 0  # 连续失败次数
@@ -500,29 +540,7 @@ def wait_for_element_visible(page, selector: str, timeout_config: TimeoutConfig,
             consecutive_failures = 0  # 重置失败计数
             
             if strategy == "normal":
-                # Normal模式有更复杂的内容检查逻辑
-                if text_length > 100:  # 如果已经有足够内容，直接成功
-                    logger.info(f"内容充足 ({text_length} 字符)，完成等待")
-                    return True
-                elif text_length > 0:
-                    # 有少量内容，再等待一段时间看是否有更多内容加载
-                    remaining_time = timeout - (time.time() - wait_start_time)
-                    additional_wait = min(remaining_time, timeout_config.content_additional_wait)
-                    
-                    if additional_wait > 0:
-                        logger.info(f"内容较少 ({text_length} 字符)，再等待 {additional_wait:.1f} 秒看是否有更多内容...")
-                        time.sleep(additional_wait)
-                        
-                        # 再次检查
-                        is_ready_again, _, text_length_again, _ = check_element_visibility_and_content(page, selector)
-                        if is_ready_again and text_length_again >= text_length:
-                            logger.info(f"内容已更新到 {text_length_again} 字符，接受当前状态")
-                        else:
-                            logger.info(f"内容无明显增加，接受当前状态 ({text_length} 字符)")
-                    
-                    return True
-                else:
-                    logger.info("元素可见但无文本内容，继续等待...")
+                return _handle_normal_strategy_content(page, selector, text_length, timeout_config, wait_start_time, timeout)
             else:
                 # Fast和Thorough模式只要元素可见就成功
                 return True
@@ -532,8 +550,7 @@ def wait_for_element_visible(page, selector: str, timeout_config: TimeoutConfig,
             remaining = timeout - elapsed
             
             # 如果是"元素不存在"且连续失败多次，可能是外部链接，快速失败
-            if "元素不存在" in status_msg and consecutive_failures >= max_consecutive_failures:
-                logger.warning(f"元素连续 {consecutive_failures} 次不存在，可能是外部链接或无效页面，快速失败")
+            if _check_consecutive_failures(status_msg, consecutive_failures, max_consecutive_failures):
                 return False
             
             logger.info(f"元素状态: {status_msg}, 已等待 {elapsed:.1f}s, 剩余 {remaining:.1f}s, 连续失败: {consecutive_failures}")
@@ -599,48 +616,103 @@ def _setup_slow_request_monitoring(page, timeout_config: TimeoutConfig):
 
     return slow_requests
 
+def _apply_fast_load_strategy(page, content_selector, timeout_config):
+    """应用快速加载策略"""
+    logger.info("快速加载模式：跳过网络空闲等待，但持续等待元素可见")
+    return wait_for_element_visible(page, content_selector, timeout_config, "fast")
+
+def _apply_thorough_load_strategy(page, content_selector, timeout_config, slow_requests):
+    """应用彻底加载策略"""
+    logger.info("彻底加载模式：等待完全的网络空闲，然后持续等待元素可见")
+    
+    # 首先等待网络空闲
+    try:
+        page.wait_for_load_state("networkidle", timeout=timeout_config.base_timeout*1000)
+        logger.info("网络已达到空闲状态")
+    except PlaywrightTimeoutError:
+        logger.warning("网络空闲等待超时，继续等待元素可见")
+        # 在thorough模式下，打印还在加载的慢请求
+        _log_ongoing_slow_requests(slow_requests)
+    
+    # 然后等待元素可见（使用剩余时间）
+    remaining_timeout = max(timeout_config.base_timeout // 2, timeout_config.thorough_min_timeout)
+    timeout_config_remaining = TimeoutConfig(remaining_timeout)
+    return wait_for_element_visible(page, content_selector, timeout_config_remaining, "thorough")
+
+def _apply_normal_load_strategy(page, content_selector, timeout_config):
+    """应用正常加载策略"""
+    return wait_for_element_visible(page, content_selector, timeout_config, "normal")
+
+def _log_ongoing_slow_requests(slow_requests):
+    """记录正在进行的慢请求"""
+    if not slow_requests:
+        return
+    
+    current_time = time.time()
+    ongoing_requests = []
+    for req_url, start_time in slow_requests.items():
+        duration = current_time - start_time
+        ongoing_requests.append((req_url, duration))
+    
+    if ongoing_requests:
+        # 按持续时间排序，显示最慢的前5个
+        ongoing_requests.sort(key=lambda x: x[1], reverse=True)
+        logger.warning(f"仍有 {len(ongoing_requests)} 个请求未完成:")
+        for req_url, duration in ongoing_requests[:5]:
+            logger.warning(f"  - {duration:.1f}s: {req_url}")
+
+def _apply_load_strategy(page, content_selector, timeout_config, load_strategy, slow_requests):
+    """应用特定的加载策略"""
+    if load_strategy == "fast":
+        return _apply_fast_load_strategy(page, content_selector, timeout_config)
+    elif load_strategy == "thorough":
+        return _apply_thorough_load_strategy(page, content_selector, timeout_config, slow_requests)
+    else:  # normal strategy (智能等待)
+        return _apply_normal_load_strategy(page, content_selector, timeout_config)
+
+def _perform_single_load_attempt(page, url, content_selector, timeout_config, load_strategy, 
+                                verbose_mode, slow_requests, attempt, max_retries):
+    """执行单次页面加载尝试"""
+    logger.info(f"尝试加载页面 ({attempt+1}/{max_retries}): {url}")
+    
+    if verbose_mode:
+        logger.info("可视化模式：等待页面基本加载...")
+    
+    # 先尝试快速加载到 domcontentloaded 状态
+    page.goto(url, wait_until="domcontentloaded", timeout=timeout_config.initial_load_timeout)
+    logger.info("页面DOM已加载完成")
+    
+    if verbose_mode:
+        # 在页面标题中显示处理状态
+        try:
+            page.evaluate('''() => {
+                document.title = "[检查内容...] " + (document.title || "页面");
+            }''')
+        except:
+            pass
+    
+    # 应用加载策略
+    if _apply_load_strategy(page, content_selector, timeout_config, load_strategy, slow_requests):
+        return page.url  # 返回最终URL
+    elif attempt < max_retries - 1:
+        time.sleep(timeout_config.element_check_interval)
+    
+    return None
+
+def _handle_load_retry(attempt, max_retries, timeout_config, error):
+    """处理加载重试逻辑"""
+    if attempt == max_retries - 1:
+        logger.error("所有重试均失败，跳过此页面")
+        raise error
+    
+    # 指数退避重试
+    wait_time = min(2 ** attempt, timeout_config.retry_backoff_max)
+    logger.info(f"等待 {wait_time} 秒后重试...")
+    time.sleep(wait_time)
+
 def _handle_page_loading_with_retries(page, url, content_selector, timeout_config, max_retries, 
                                     verbose_mode, load_strategy, url_blacklist_patterns=None):
     """处理页面加载和重试逻辑"""
-    
-    def _apply_load_strategy(page, content_selector, timeout_config, load_strategy, slow_requests):
-        """应用特定的加载策略"""
-        if load_strategy == "fast":
-            logger.info("快速加载模式：跳过网络空闲等待，但持续等待元素可见")
-            return wait_for_element_visible(page, content_selector, timeout_config, "fast")
-        
-        elif load_strategy == "thorough":
-            logger.info("彻底加载模式：等待完全的网络空闲，然后持续等待元素可见")
-            
-            # 首先等待网络空闲
-            try:
-                page.wait_for_load_state("networkidle", timeout=timeout_config.base_timeout*1000)
-                logger.info("网络已达到空闲状态")
-            except PlaywrightTimeoutError:
-                logger.warning("网络空闲等待超时，继续等待元素可见")
-                # 在thorough模式下，打印还在加载的慢请求
-                if slow_requests:
-                    current_time = time.time()
-                    ongoing_requests = []
-                    for req_url, start_time in slow_requests.items():
-                        duration = current_time - start_time
-                        ongoing_requests.append((req_url, duration))
-                    
-                    if ongoing_requests:
-                        # 按持续时间排序，显示最慢的前5个
-                        ongoing_requests.sort(key=lambda x: x[1], reverse=True)
-                        logger.warning(f"仍有 {len(ongoing_requests)} 个请求未完成:")
-                        for req_url, duration in ongoing_requests[:5]:
-                            logger.warning(f"  - {duration:.1f}s: {req_url}")
-            
-            # 然后等待元素可见（使用剩余时间）
-            remaining_timeout = max(timeout_config.base_timeout // 2, timeout_config.thorough_min_timeout)
-            timeout_config_remaining = TimeoutConfig(remaining_timeout)
-            return wait_for_element_visible(page, content_selector, timeout_config_remaining, "thorough")
-        
-        else:  # normal strategy (智能等待)
-            return wait_for_element_visible(page, content_selector, timeout_config, "normal")
-    
     # 设置请求拦截
     _setup_request_blocking(page, url_blacklist_patterns)
     
@@ -649,55 +721,28 @@ def _handle_page_loading_with_retries(page, url, content_selector, timeout_confi
     
     for attempt in range(max_retries):
         try:
-            logger.info(f"尝试加载页面 ({attempt+1}/{max_retries}): {url}")
+            result = _perform_single_load_attempt(
+                page, url, content_selector, timeout_config, load_strategy, 
+                verbose_mode, slow_requests, attempt, max_retries
+            )
             
-            if verbose_mode:
-                logger.info("可视化模式：等待页面基本加载...")
-            
-            # 先尝试快速加载到 domcontentloaded 状态
-            page.goto(url, wait_until="domcontentloaded", timeout=timeout_config.initial_load_timeout)
-            logger.info("页面DOM已加载完成")
-            
-            if verbose_mode:
-                # 在页面标题中显示处理状态
-                try:
-                    page.evaluate('''() => {
-                        document.title = "[检查内容...] " + (document.title || "页面");
-                    }''')
-                except:
-                    pass
-            
-            # 应用加载策略
-            if _apply_load_strategy(page, content_selector, timeout_config, load_strategy, slow_requests):
-                return page.url  # 返回最终URL
-            elif attempt < max_retries - 1:
-                time.sleep(timeout_config.element_check_interval)
+            if result:
+                return result
             
         except PlaywrightTimeoutError as timeout_err:
             if "Timeout" in str(timeout_err) and "goto" in str(timeout_err):
                 logger.warning(f"第 {attempt+1} 次页面加载超时: {timeout_err}")
             else:
                 logger.warning(f"第 {attempt+1} 次操作超时: {timeout_err}")
-                
-            if attempt == max_retries - 1:
-                logger.error("所有重试均失败，跳过此页面")
-                raise
-                
-            # 指数退避重试
-            wait_time = min(2 ** attempt, timeout_config.retry_backoff_max)
-            logger.info(f"等待 {wait_time} 秒后重试...")
-            time.sleep(wait_time)
+            
+            _handle_load_retry(attempt, max_retries, timeout_config, timeout_err)
         
         except Exception as e:
-            if attempt == max_retries - 1:
-                logger.error(f"所有重试均失败: {str(e)}")
-                raise
             logger.warning(f"第 {attempt+1} 次页面加载异常: {str(e)}，重试中...")
-            wait_time = min(2 ** attempt, timeout_config.retry_backoff_max)
-            time.sleep(wait_time)
-    else:
-        logger.error("所有重试均失败，跳过此页面")
-        raise Exception("所有重试均失败")
+            _handle_load_retry(attempt, max_retries, timeout_config, e)
+    
+    logger.error("所有重试均失败，跳过此页面")
+    raise Exception("所有重试均失败")
 
 def _extract_page_links(page, toc_selector, final_url, base_url):
     """提取页面中的导航链接"""
@@ -920,18 +965,55 @@ def _generate_pdf_from_page(page, verbose_mode, timeout_config, temp_dir: str, u
         logger.error(f"生成PDF失败: {pdf_err}")
         return None
 
+def _check_existing_pdf(temp_dir, url):
+    """检查是否已经存在PDF文件"""
+    if not temp_dir:
+        return None
+    
+    expected_pdf = Path(temp_dir) / url_to_filename(url)
+    if expected_pdf.exists() and expected_pdf.stat().st_size > 1000:
+        logger.info(f"发现已存在的PDF文件，跳过处理: {url}")
+        return expected_pdf
+    return None
+
+def _handle_page_loading(page, url, content_selector, timeout_config, max_retries, 
+                        verbose_mode, load_strategy, url_blacklist_patterns):
+    """处理页面加载逻辑"""
+    try:
+        return _handle_page_loading_with_retries(
+            page, url, content_selector, timeout_config, max_retries, 
+            verbose_mode, load_strategy, url_blacklist_patterns
+        )
+    except Exception as e:
+        raise Exception(f"页面加载失败: {str(e)}")
+
+def _generate_pdf_with_validation(page, content_selector, verbose_mode, timeout_config, 
+                                 debug_mode, debug_dir, temp_dir, url):
+    """生成PDF并进行验证"""
+    if not temp_dir:
+        raise ValueError("temp_dir参数是必需的")
+    
+    # 准备页面内容用于PDF生成
+    if not _prepare_page_for_pdf(page, content_selector, verbose_mode, timeout_config, debug_mode, debug_dir, url):
+        raise Exception("内容元素不可见或不存在")
+    
+    # 生成PDF
+    pdf_path = _generate_pdf_from_page(page, verbose_mode, timeout_config, temp_dir, url)
+    if not pdf_path:
+        raise Exception("PDF生成失败")
+    
+    return pdf_path
+
 def process_page_with_failure_tracking(page, url, content_selector, toc_selector, base_url, timeout_config: TimeoutConfig, 
                 max_retries, debug_mode=False, debug_dir=None, verbose_mode=False, load_strategy="normal", 
                 url_blacklist_patterns=None, temp_dir=None):
     """处理单个页面并生成PDF，同时提取该页面内的链接，包含失败跟踪"""
     
     # 检查是否已经处理过这个URL（根据PDF文件是否存在）
-    if temp_dir:
-        expected_pdf = Path(temp_dir) / url_to_filename(url)
-        if expected_pdf.exists() and expected_pdf.stat().st_size > 1000:  # 文件存在且大小合理
-            logger.info(f"发现已存在的PDF文件，跳过处理: {url}")
-            # 仍然需要提取链接，所以继续处理，但跳过PDF生成
-            pass
+    existing_pdf = _check_existing_pdf(temp_dir, url)
+    if existing_pdf:
+        # 仍然需要提取链接，所以继续处理，但跳过PDF生成
+        pass
     
     pdf_path = None
     links = []
@@ -943,12 +1025,12 @@ def process_page_with_failure_tracking(page, url, content_selector, toc_selector
         
         # 处理页面加载和重试逻辑
         try:
-            final_url = _handle_page_loading_with_retries(
+            final_url = _handle_page_loading(
                 page, url, content_selector, timeout_config, max_retries, 
                 verbose_mode, load_strategy, url_blacklist_patterns
             )
         except Exception as e:
-            failure_reason = f"页面加载失败: {str(e)}"
+            failure_reason = str(e)
             logger.warning(f"页面加载失败，将记录为待重试: {url} - {failure_reason}")
             return None, [], url, failure_reason
         
@@ -959,30 +1041,20 @@ def process_page_with_failure_tracking(page, url, content_selector, toc_selector
         links = _extract_page_links(page, toc_selector, final_url, base_url)
         
         # 如果PDF已存在，直接返回
-        if temp_dir:
-            expected_pdf = Path(temp_dir) / url_to_filename(url)
-            if expected_pdf.exists() and expected_pdf.stat().st_size > 1000:
-                return expected_pdf, links, final_url, None
-        
-        # 准备页面内容用于PDF生成
-        if not _prepare_page_for_pdf(page, content_selector, verbose_mode, timeout_config, debug_mode, debug_dir, url):
-            failure_reason = "内容元素不可见或不存在"
-            logger.warning(f"页面内容准备失败，将记录为待重试: {url} - {failure_reason}")
-            return None, links, final_url, failure_reason
+        if existing_pdf:
+            return existing_pdf, links, final_url, None
         
         # 生成PDF
-        if not temp_dir:
-            # 如果没有提供temp_dir，这里应该抛出错误，因为现在temp_dir应该总是由调用者提供
-            raise ValueError("temp_dir参数是必需的")
-            
-        pdf_path = _generate_pdf_from_page(page, verbose_mode, timeout_config, temp_dir, url)
-        
-        if not pdf_path:
-            failure_reason = "PDF生成失败"
+        try:
+            pdf_path = _generate_pdf_with_validation(
+                page, content_selector, verbose_mode, timeout_config, 
+                debug_mode, debug_dir, temp_dir, url
+            )
+            return pdf_path, links, final_url, None
+        except Exception as e:
+            failure_reason = str(e)
             logger.warning(f"PDF生成失败，将记录为待重试: {url} - {failure_reason}")
             return None, links, final_url, failure_reason
-        
-        return pdf_path, links, final_url, None
     
     except Exception as e:
         failure_reason = f"处理页面异常: {str(e)}"
@@ -1177,6 +1249,107 @@ def _crawl_pages_serial(context, args, base_url_normalized, url_pattern, url_bla
     
     return progress_state
 
+def _start_initial_loading_tasks(pipeline_pool, progress_state, args, timeout_config, url_blacklist_patterns):
+    """启动初始页面预加载任务"""
+    loading_tasks = {}  # {task_id: (url, depth)}
+    next_task_id = 0
+    
+    initial_batch_size = min(args.parallel_pages, len(progress_state.queue))
+    for _ in range(initial_batch_size):
+        if progress_state.queue:
+            url, depth = progress_state.queue.popleft()
+            if url not in progress_state.visited_urls and depth <= args.max_depth:
+                task_id = pipeline_pool.start_loading(
+                    url, depth, args.content_selector, timeout_config,
+                    url_blacklist_patterns, args.load_strategy, args.max_retries, args.verbose
+                )
+                loading_tasks[task_id] = (url, depth)
+                next_task_id = max(next_task_id, task_id + 1)
+    
+    logger.info(f"🚀 已启动 {len(loading_tasks)} 个初始预加载任务")
+    return loading_tasks
+
+def _find_completed_task(pipeline_pool, loading_tasks):
+    """查找已完成的任务"""
+    # 选择一个已完成加载的任务进行处理
+    completed_task_id = None
+    for task_id in loading_tasks:
+        # 尝试获取已加载的页面（不等待）
+        page, final_url, error = pipeline_pool.get_loaded_page(task_id, timeout=0.1)
+        if page is not None or error is not None:
+            completed_task_id = task_id
+            break
+    
+    if completed_task_id is None:
+        # 如果没有任务完成，等待最早的任务
+        earliest_task_id = min(loading_tasks.keys())
+        page, final_url, error = pipeline_pool.get_loaded_page(earliest_task_id, timeout=30)
+        completed_task_id = earliest_task_id
+    
+    return completed_task_id
+
+def _process_completed_task(pipeline_pool, loading_tasks, completed_task_id, progress_state, 
+                           args, base_url_normalized, url_pattern, timeout_config):
+    """处理已完成的任务"""
+    if completed_task_id not in loading_tasks:
+        return
+    
+    url, depth = loading_tasks[completed_task_id]
+    page, final_url, error = pipeline_pool.get_loaded_page(completed_task_id, timeout=0.1)
+    
+    # 显示进度信息
+    processed_count = len(progress_state.visited_urls) + 1
+    total_discovered = len(progress_state.enqueued)
+    remaining_in_queue = len(progress_state.queue)
+    active_loading = len(loading_tasks) - 1  # 减去当前正在处理的
+    progress_info = f"流水线进度: [{processed_count}/{total_discovered}]"
+    if remaining_in_queue > 0 or active_loading > 0:
+        progress_info += f" (队列: {remaining_in_queue}, 预加载中: {active_loading})"
+    
+    logger.info(f"{progress_info} 处理: {url} (深度: {depth})")
+    
+    if depth > args.max_depth:
+        logger.warning(f"超过最大深度限制({args.max_depth})，跳过: {url}")
+    elif url in progress_state.visited_urls:
+        logger.info(f"已访问过，跳过: {url}")
+    elif page is not None:
+        # 页面加载成功，进行内容处理
+        try:
+            pdf_path, links = _process_loaded_page(
+                page, url, final_url or url, args, base_url_normalized, timeout_config,
+                progress_state.temp_dir
+            )
+            
+            _handle_page_result(
+                progress_state, url, final_url or url, pdf_path, links, None,
+                url_pattern, base_url_normalized, depth, args.max_depth
+            )
+            
+        except Exception as e:
+            logger.exception(f"处理已加载页面 {url} 时发生错误")
+            progress_state.failed_urls.append((url, f"处理异常: {str(e)}"))
+            progress_state.visited_urls.add(url)
+    else:
+        # 页面加载失败
+        failure_reason = error or "页面加载失败"
+        logger.warning(f"页面加载失败: {url} - {failure_reason}")
+        progress_state.failed_urls.append((url, failure_reason))
+        progress_state.visited_urls.add(url)
+
+def _start_new_loading_task(pipeline_pool, loading_tasks, progress_state, args, timeout_config, url_blacklist_patterns):
+    """启动新的预加载任务"""
+    if not progress_state.queue:
+        return
+    
+    next_url, next_depth = progress_state.queue.popleft()
+    if next_url not in progress_state.visited_urls and next_depth <= args.max_depth:
+        task_id = pipeline_pool.start_loading(
+            next_url, next_depth, args.content_selector, timeout_config,
+            url_blacklist_patterns, args.load_strategy, args.max_retries, args.verbose
+        )
+        loading_tasks[task_id] = (next_url, next_depth)
+        logger.info(f"🚀 启动新的预加载任务 #{task_id}: {next_url}")
+
 def _crawl_pages_pipeline(context, args, base_url_normalized, url_pattern, url_blacklist_patterns,
                          timeout_config, progress_state: ProgressState):
     """流水线并行处理模式"""
@@ -1186,102 +1359,33 @@ def _crawl_pages_pipeline(context, args, base_url_normalized, url_pattern, url_b
     pipeline_pool = PipelinePagePool(context, args.parallel_pages)
     
     try:
-        processed_count = len(progress_state.visited_urls)
-        loading_tasks = {}  # {task_id: (url, depth)}
-        next_task_id = 0
-        
         # 启动初始页面预加载
-        initial_batch_size = min(args.parallel_pages, len(progress_state.queue))
-        for _ in range(initial_batch_size):
-            if progress_state.queue:
-                url, depth = progress_state.queue.popleft()
-                if url not in progress_state.visited_urls and depth <= args.max_depth:
-                    task_id = pipeline_pool.start_loading(
-                        url, depth, args.content_selector, timeout_config,
-                        url_blacklist_patterns, args.load_strategy, args.max_retries, args.verbose
-                    )
-                    loading_tasks[task_id] = (url, depth)
-                    next_task_id = max(next_task_id, task_id + 1)
-        
-        logger.info(f"🚀 已启动 {len(loading_tasks)} 个初始预加载任务")
+        loading_tasks = _start_initial_loading_tasks(
+            pipeline_pool, progress_state, args, timeout_config, url_blacklist_patterns
+        )
         
         # 流水线处理循环
         while loading_tasks:
             # 选择一个已完成加载的任务进行处理
-            completed_task_id = None
-            for task_id in loading_tasks:
-                # 尝试获取已加载的页面（不等待）
-                page, final_url, error = pipeline_pool.get_loaded_page(task_id, timeout=0.1)
-                if page is not None or error is not None:
-                    completed_task_id = task_id
-                    break
-            
-            if completed_task_id is None:
-                # 如果没有任务完成，等待最早的任务
-                earliest_task_id = min(loading_tasks.keys())
-                page, final_url, error = pipeline_pool.get_loaded_page(earliest_task_id, timeout=30)
-                completed_task_id = earliest_task_id
+            completed_task_id = _find_completed_task(pipeline_pool, loading_tasks)
             
             # 处理已完成的任务
-            if completed_task_id in loading_tasks:
-                url, depth = loading_tasks[completed_task_id]
-                processed_count += 1
-                
-                # 显示进度信息
-                total_discovered = len(progress_state.enqueued)
-                remaining_in_queue = len(progress_state.queue)
-                active_loading = len(loading_tasks) - 1  # 减去当前正在处理的
-                progress_info = f"流水线进度: [{processed_count}/{total_discovered}]"
-                if remaining_in_queue > 0 or active_loading > 0:
-                    progress_info += f" (队列: {remaining_in_queue}, 预加载中: {active_loading})"
-                
-                logger.info(f"{progress_info} 处理: {url} (深度: {depth})")
-                
-                if depth > args.max_depth:
-                    logger.warning(f"超过最大深度限制({args.max_depth})，跳过: {url}")
-                elif url in progress_state.visited_urls:
-                    logger.info(f"已访问过，跳过: {url}")
-                elif page is not None:
-                    # 页面加载成功，进行内容处理
-                    try:
-                        pdf_path, links = _process_loaded_page(
-                            page, url, final_url or url, args, base_url_normalized, timeout_config,
-                            progress_state.temp_dir
-                        )
-                        
-                        _handle_page_result(
-                            progress_state, url, final_url or url, pdf_path, links, None,
-                            url_pattern, base_url_normalized, depth, args.max_depth
-                        )
-                        
-                    except Exception as e:
-                        logger.exception(f"处理已加载页面 {url} 时发生错误")
-                        progress_state.failed_urls.append((url, f"处理异常: {str(e)}"))
-                        progress_state.visited_urls.add(url)
-                else:
-                    # 页面加载失败
-                    failure_reason = error or "页面加载失败"
-                    logger.warning(f"页面加载失败: {url} - {failure_reason}")
-                    progress_state.failed_urls.append((url, failure_reason))
-                    progress_state.visited_urls.add(url)
-                
-                # 清理已完成的任务
-                pipeline_pool.finish_page(completed_task_id)
-                del loading_tasks[completed_task_id]
-                
-                # 启动新的预加载任务（如果队列中还有URL）
-                if progress_state.queue:
-                    next_url, next_depth = progress_state.queue.popleft()
-                    if next_url not in progress_state.visited_urls and next_depth <= args.max_depth:
-                        task_id = pipeline_pool.start_loading(
-                            next_url, next_depth, args.content_selector, timeout_config,
-                            url_blacklist_patterns, args.load_strategy, args.max_retries, args.verbose
-                        )
-                        loading_tasks[task_id] = (next_url, next_depth)
-                        logger.info(f"🚀 启动新的预加载任务 #{task_id}: {next_url}")
-                
-                # 每处理一个URL就保存进度
-                progress_state.save_to_file()
+            _process_completed_task(
+                pipeline_pool, loading_tasks, completed_task_id, progress_state,
+                args, base_url_normalized, url_pattern, timeout_config
+            )
+            
+            # 清理已完成的任务
+            pipeline_pool.finish_page(completed_task_id)
+            del loading_tasks[completed_task_id]
+            
+            # 启动新的预加载任务（如果队列中还有URL）
+            _start_new_loading_task(
+                pipeline_pool, loading_tasks, progress_state, args, timeout_config, url_blacklist_patterns
+            )
+            
+            # 每处理一个URL就保存进度
+            progress_state.save_to_file()
         
     finally:
         # 确保流水线页面池被正确关闭
@@ -1363,20 +1467,12 @@ def _handle_page_result(progress_state, url, final_url, pdf_path, links, failure
     if new_links_count > 0:
         logger.info(f"📊 从当前页面发现 {new_links_count} 个新链接，队列总数: {len(progress_state.queue)}")
 
-def _interactive_retry_failed_urls(context, failed_urls, args, base_url_normalized, timeout_config, url_blacklist_patterns):
-    """交互式重试失败的URL"""
-    if not failed_urls:
-        return [], []
-    
+def _prompt_user_choice(failed_urls):
+    """提示用户选择重试方式"""
     print(f"\n=== 发现 {len(failed_urls)} 个失败的URL ===")
     for i, (url, reason) in enumerate(failed_urls, 1):
         print(f"{i}. {url}")
         print(f"   失败原因: {reason}")
-    
-    # 如果启用了跳过失败重试选项，直接返回
-    if args.skip_failed_retry:
-        logger.info("启用了跳过失败重试选项，直接处理成功的页面")
-        return [], []
     
     while True:
         try:
@@ -1386,48 +1482,97 @@ def _interactive_retry_failed_urls(context, failed_urls, args, base_url_normaliz
                           f"3. 跳过所有失败的URL\n"
                           f"请选择 (1-3): ").strip()
             
-            if choice == "3":
-                logger.info("用户选择跳过所有失败的URL")
-                return [], []
-            elif choice == "1":
-                urls_to_retry = [url for url, _ in failed_urls]
-                break
-            elif choice == "2":
-                urls_to_retry = []
-                for i, (url, reason) in enumerate(failed_urls, 1):
-                    retry_choice = input(f"重试 URL {i}: {url} ? (y/n): ").strip().lower()
-                    if retry_choice in ['y', 'yes', '是']:
-                        urls_to_retry.append(url)
-                break
+            if choice in ["1", "2", "3"]:
+                return choice
             else:
                 print("无效选择，请输入 1、2 或 3")
                 continue
         except (EOFError, KeyboardInterrupt):
             logger.info("用户取消重试")
-            return [], []
-    
-    if not urls_to_retry:
-        logger.info("没有选择要重试的URL")
-        return [], []
-    
-    # 询问重试次数
+            return "3"
+
+def _get_urls_to_retry(choice, failed_urls):
+    """根据用户选择获取要重试的URL列表"""
+    if choice == "3":
+        logger.info("用户选择跳过所有失败的URL")
+        return []
+    elif choice == "1":
+        return [url for url, _ in failed_urls]
+    elif choice == "2":
+        urls_to_retry = []
+        for i, (url, reason) in enumerate(failed_urls, 1):
+            retry_choice = input(f"重试 URL {i}: {url} ? (y/n): ").strip().lower()
+            if retry_choice in ['y', 'yes', '是']:
+                urls_to_retry.append(url)
+        return urls_to_retry
+    return []
+
+def _get_retry_count():
+    """获取重试次数"""
     while True:
         try:
             retry_count = input(f"重试次数 (1-10, 默认3): ").strip()
             if not retry_count:
-                retry_count = 3
+                return 3
             else:
                 retry_count = int(retry_count)
                 if retry_count < 1 or retry_count > 10:
                     print("重试次数必须在1-10之间")
                     continue
-            break
+                return retry_count
         except ValueError:
             print("请输入有效的数字")
             continue
         except (EOFError, KeyboardInterrupt):
             logger.info("用户取消重试")
-            return [], []
+            return 0
+
+def _retry_single_url(retry_page, url, args, base_url_normalized, timeout_config, 
+                     url_blacklist_patterns, retry_count):
+    """重试单个URL"""
+    for attempt in range(retry_count):
+        try:
+            pdf_path, _, final_url, failure_reason = process_page_with_failure_tracking(
+                retry_page, url, args.content_selector, args.toc_selector,
+                base_url_normalized, timeout_config, args.max_retries,
+                args.debug, args.debug_dir, args.verbose, args.load_strategy,
+                url_blacklist_patterns
+            )
+            
+            if pdf_path and pdf_path.exists():
+                logger.info(f"✅ 重试成功: {url}")
+                return pdf_path, url, True
+            else:
+                logger.warning(f"⚠️ 重试第 {attempt + 1}/{retry_count} 次失败: {url} - {failure_reason}")
+                
+        except Exception as e:
+            logger.warning(f"⚠️ 重试第 {attempt + 1}/{retry_count} 次异常: {url} - {str(e)}")
+    
+    logger.error(f"❌ 重试所有次数后仍然失败: {url}")
+    return None, url, False
+
+def _interactive_retry_failed_urls(context, failed_urls, args, base_url_normalized, timeout_config, url_blacklist_patterns):
+    """交互式重试失败的URL"""
+    if not failed_urls:
+        return [], []
+    
+    # 如果启用了跳过失败重试选项，直接返回
+    if args.skip_failed_retry:
+        logger.info("启用了跳过失败重试选项，直接处理成功的页面")
+        return [], []
+    
+    # 获取用户选择
+    choice = _prompt_user_choice(failed_urls)
+    urls_to_retry = _get_urls_to_retry(choice, failed_urls)
+    
+    if not urls_to_retry:
+        logger.info("没有选择要重试的URL")
+        return [], []
+    
+    # 获取重试次数
+    retry_count = _get_retry_count()
+    if retry_count == 0:
+        return [], []
     
     logger.info(f"开始重试 {len(urls_to_retry)} 个失败的URL，重试次数: {retry_count}")
     
@@ -1442,40 +1587,17 @@ def _interactive_retry_failed_urls(context, failed_urls, args, base_url_normaliz
         
         for i, url in enumerate(urls_to_retry, 1):
             logger.info(f"🔄 重试进度: [{i}/{len(urls_to_retry)}] 处理: {url}")
-            success = False
             
-            for attempt in range(retry_count):
-                try:
-                    pdf_path, _, final_url, failure_reason = process_page_with_failure_tracking(
-                        retry_page,  # 使用重试专用页面
-                        url, 
-                        args.content_selector, 
-                        args.toc_selector,
-                        base_url_normalized,
-                        timeout_config,
-                        args.max_retries,
-                        args.debug,
-                        args.debug_dir,
-                        args.verbose,
-                        args.load_strategy,
-                        url_blacklist_patterns  # 重试时也应用黑名单，避免访问被禁止的域名
-                    )
-                    
-                    if pdf_path and pdf_path.exists():
-                        retry_pdf_files.append(pdf_path)
-                        retry_processed_urls.append(url)
-                        logger.info(f"✅ 重试成功: {url}")
-                        success = True
-                        break
-                    else:
-                        logger.warning(f"⚠️ 重试第 {attempt + 1}/{retry_count} 次失败: {url} - {failure_reason}")
-                        
-                except Exception as e:
-                    logger.warning(f"⚠️ 重试第 {attempt + 1}/{retry_count} 次异常: {url} - {str(e)}")
+            pdf_path, processed_url, success = _retry_single_url(
+                retry_page, url, args, base_url_normalized, timeout_config, 
+                url_blacklist_patterns, retry_count
+            )
             
-            if not success:
+            if success:
+                retry_pdf_files.append(pdf_path)
+                retry_processed_urls.append(processed_url)
+            else:
                 still_failed_urls.append((url, "重试后仍然失败"))
-                logger.error(f"❌ 重试所有次数后仍然失败: {url}")
         
     finally:
         # 确保重试页面被正确关闭
@@ -1578,7 +1700,8 @@ def _merge_pdfs(pdf_files, processed_urls, args):
     
     return merged_files
 
-def main():
+def _create_argument_parser():
+    """创建命令行参数解析器"""
     parser = argparse.ArgumentParser(description="Webpage to PDF converter")
     parser.add_argument("--base-url", required=True, help="起始URL")
     parser.add_argument("--url-pattern", default=None, help="URL匹配模式正则表达式")
@@ -1605,23 +1728,23 @@ def main():
                        help="清理指定URL和输出文件对应的临时文件和进度文件")
     parser.add_argument("--parallel-pages", type=int, default=2, choices=[1, 2, 3, 4],
                        help="并行页面数量 (1-4)，提高处理速度但会增加内存使用。1=串行处理，2+=并行处理")
-    args = parser.parse_args()
-    
-    # 处理清理命令
-    if args.cleanup:
-        base_url_normalized = normalize_url(args.base_url)
-        # 计算缓存ID
-        cache_id = calculate_cache_id(
-            base_url_normalized, 
-            args.content_selector, 
-            args.toc_selector, 
-            args.max_depth, 
-            args.url_pattern
-        )
-        cache_dir = get_cache_directory(cache_id)
-        cleanup_cache_directory(cache_dir)
-        return
-    
+    return parser
+
+def _handle_cleanup_command(args):
+    """处理清理命令"""
+    base_url_normalized = normalize_url(args.base_url)
+    cache_id = calculate_cache_id(
+        base_url_normalized, 
+        args.content_selector, 
+        args.toc_selector, 
+        args.max_depth, 
+        args.url_pattern
+    )
+    cache_dir = get_cache_directory(cache_id)
+    cleanup_cache_directory(cache_dir)
+
+def _initialize_configuration(args):
+    """初始化程序配置"""
     logger.info(f"开始执行PDF爬虫程序，超时设置: {args.timeout}秒")
     
     # 创建超时配置对象
@@ -1646,78 +1769,110 @@ def main():
         url_pattern = re.compile(default_pattern)
         logger.info(f"使用默认URL匹配模式（基于父目录）: {url_pattern.pattern}")
     
+    return timeout_config, base_url_normalized, url_blacklist_patterns, url_pattern
+
+def _setup_browser_context(p, args):
+    """设置浏览器和上下文"""
+    headless_mode = not args.verbose
+    if args.verbose:
+        logger.info("启用可视化模式 - 浏览器界面将显示处理过程")
+    else:
+        logger.info("使用无头模式 - 浏览器在后台运行")
+        
+    browser = p.chromium.launch(
+        headless=headless_mode, 
+        args=[
+            '--disable-gpu',
+            '--disable-dev-shm-usage',
+            '--disable-setuid-sandbox',
+            '--no-sandbox',
+            '--disable-blink-features=AutomationControlled'
+        ] if headless_mode else [
+            '--disable-blink-features=AutomationControlled'
+        ]  # 在可视化模式下减少启动参数，避免影响显示
+    )
+    context = browser.new_context(
+        viewport={'width': 1366, 'height': 768},
+        ignore_https_errors=True,
+        java_script_enabled=True,
+        bypass_csp=True
+    )
+    
+    context.set_default_timeout(args.timeout * 1000)
+    return browser, context
+
+def _setup_cache_and_progress(args, base_url_normalized):
+    """设置缓存和进度状态"""
+    cache_id = calculate_cache_id(
+        base_url_normalized, 
+        args.content_selector, 
+        args.toc_selector, 
+        args.max_depth, 
+        args.url_pattern
+    )
+    cache_dir = get_cache_directory(cache_id)
+    use_cache = not args.no_cache
+    
+    logger.info(f"缓存目录: {cache_dir}")
+    logger.info(f"缓存模式: {'启用' if use_cache else '禁用'}")
+    
+    # 初始化或恢复进度状态
+    progress_state, is_resumed = _initialize_or_resume_progress(
+        base_url_normalized, args.output_pdf, args.max_depth, cache_dir, use_cache
+    )
+    
+    # 设置信号处理器，支持中断恢复
+    setup_signal_handlers(progress_state)
+    
+    if is_resumed and use_cache:
+        logger.info("发现未完成的爬取任务，自动继续执行...")
+    elif is_resumed and not use_cache:
+        logger.info("禁用缓存模式，将从头开始爬取")
+    
+    return cache_dir, use_cache, progress_state
+
+def _execute_crawling_workflow(context, args, base_url_normalized, url_pattern, 
+                              url_blacklist_patterns, timeout_config, progress_state):
+    """执行爬取工作流"""
+    # 执行爬取（支持进度恢复）
+    progress_state = _crawl_pages_with_progress(
+        context, args, base_url_normalized, url_pattern, 
+        url_blacklist_patterns, timeout_config, progress_state
+    )
+    
+    # 如果有失败的URL，询问是否重试
+    if progress_state.failed_urls and not args.skip_failed_retry:
+        retry_pdf_files, retry_processed_urls = _interactive_retry_failed_urls(
+            context, progress_state.failed_urls, args, base_url_normalized, timeout_config, url_blacklist_patterns
+        )
+        
+        # 合并重试成功的文件
+        progress_state.pdf_files.extend(retry_pdf_files)
+        progress_state.processed_urls.extend(retry_processed_urls)
+    
+    return progress_state
+
+def main():
+    parser = _create_argument_parser()
+    args = parser.parse_args()
+    
+    # 处理清理命令
+    if args.cleanup:
+        _handle_cleanup_command(args)
+        return
+    
+    # 初始化配置
+    timeout_config, base_url_normalized, url_blacklist_patterns, url_pattern = _initialize_configuration(args)
+    
     with sync_playwright() as p:
-        # 根据verbose参数决定是否显示浏览器界面
-        headless_mode = not args.verbose
-        if args.verbose:
-            logger.info("启用可视化模式 - 浏览器界面将显示处理过程")
-        else:
-            logger.info("使用无头模式 - 浏览器在后台运行")
-            
-        browser = p.chromium.launch(
-            headless=headless_mode, 
-            args=[
-                '--disable-gpu',
-                '--disable-dev-shm-usage',
-                '--disable-setuid-sandbox',
-                '--no-sandbox',
-                '--disable-blink-features=AutomationControlled'
-            ] if headless_mode else [
-                '--disable-blink-features=AutomationControlled'
-            ]  # 在可视化模式下减少启动参数，避免影响显示
-        )
-        context = browser.new_context(
-            viewport={'width': 1366, 'height': 768},
-            ignore_https_errors=True,
-            java_script_enabled=True,
-            bypass_csp=True
-        )
-        
-        context.set_default_timeout(args.timeout * 1000)
-        
-        # 计算缓存ID和缓存目录
-        cache_id = calculate_cache_id(
-            base_url_normalized, 
-            args.content_selector, 
-            args.toc_selector, 
-            args.max_depth, 
-            args.url_pattern
-        )
-        cache_dir = get_cache_directory(cache_id)
-        use_cache = not args.no_cache
-        
-        logger.info(f"缓存目录: {cache_dir}")
-        logger.info(f"缓存模式: {'启用' if use_cache else '禁用'}")
-        
-        # 初始化或恢复进度状态
-        progress_state, is_resumed = _initialize_or_resume_progress(
-            base_url_normalized, args.output_pdf, args.max_depth, cache_dir, use_cache
-        )
-        
-        # 设置信号处理器，支持中断恢复
-        setup_signal_handlers(progress_state)
-        
-        if is_resumed and use_cache:
-            logger.info("发现未完成的爬取任务，自动继续执行...")
-        elif is_resumed and not use_cache:
-            logger.info("禁用缓存模式，将从头开始爬取")
+        browser, context = _setup_browser_context(p, args)
+        cache_dir, use_cache, progress_state = _setup_cache_and_progress(args, base_url_normalized)
         
         try:
-            # 执行爬取（支持进度恢复）
-            progress_state = _crawl_pages_with_progress(
+            progress_state = _execute_crawling_workflow(
                 context, args, base_url_normalized, url_pattern, 
                 url_blacklist_patterns, timeout_config, progress_state
             )
-            
-            # 如果有失败的URL，询问是否重试
-            if progress_state.failed_urls and not args.skip_failed_retry:
-                retry_pdf_files, retry_processed_urls = _interactive_retry_failed_urls(
-                    context, progress_state.failed_urls, args, base_url_normalized, timeout_config, url_blacklist_patterns
-                )
-                
-                # 合并重试成功的文件
-                progress_state.pdf_files.extend(retry_pdf_files)
-                progress_state.processed_urls.extend(retry_processed_urls)
             
             logger.info(f"爬取完成，关闭浏览器...")
             browser.close()
