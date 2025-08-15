@@ -1088,7 +1088,7 @@ def _crawl_pages_with_progress(context, args, base_url_normalized, url_pattern, 
     
     return progress_state
 
-def _interactive_retry_failed_urls(context, failed_urls, args, base_url_normalized, timeout_config):
+def _interactive_retry_failed_urls(context, failed_urls, args, base_url_normalized, timeout_config, url_blacklist_patterns):
     """交互式重试失败的URL"""
     if not failed_urls:
         return [], []
@@ -1183,7 +1183,7 @@ def _interactive_retry_failed_urls(context, failed_urls, args, base_url_normaliz
                         args.debug_dir,
                         args.verbose,
                         args.load_strategy,
-                        []  # 重试时不应用黑名单，可能之前被误拦
+                        url_blacklist_patterns  # 重试时也应用黑名单，避免访问被禁止的域名
                     )
                     
                     if pdf_path and pdf_path.exists():
@@ -1335,7 +1335,28 @@ def main():
     # 处理清理命令
     if args.cleanup:
         base_url_normalized = normalize_url(args.base_url)
-        cleanup_temp_files(base_url_normalized, args.output_pdf)
+        progress_file = create_progress_file_path(args.output_pdf, base_url_normalized)
+        
+        # 尝试从进度文件中读取temp_dir
+        temp_dir = None
+        if os.path.exists(progress_file):
+            try:
+                with open(progress_file, 'r', encoding='utf-8') as f:
+                    progress_data = json.load(f)
+                    temp_dir = progress_data.get('temp_dir')
+            except Exception as e:
+                logger.warning(f"读取进度文件失败: {e}")
+        
+        if temp_dir:
+            cleanup_temp_files(temp_dir, progress_file)
+        else:
+            # 如果无法从进度文件获取temp_dir，删除进度文件
+            if os.path.exists(progress_file):
+                os.unlink(progress_file)
+                logger.info(f"删除进度文件: {progress_file}")
+            else:
+                logger.info("未找到需要清理的临时文件")
+        
         logger.info("清理完成")
         return
     
@@ -1395,13 +1416,13 @@ def main():
         
         context.set_default_timeout(args.timeout * 1000)
         
-        # 设置信号处理器，支持中断恢复
-        setup_signal_handlers()
-        
         # 初始化或恢复进度状态
         progress_state, is_resumed = _initialize_or_resume_progress(
             base_url_normalized, args.output_pdf, args.max_depth
         )
+        
+        # 设置信号处理器，支持中断恢复
+        setup_signal_handlers(progress_state)
         
         if is_resumed and not args.resume:
             response = input("发现未完成的爬取任务，是否继续？[y/N]: ").strip().lower()
@@ -1420,7 +1441,7 @@ def main():
             # 如果有失败的URL，询问是否重试
             if progress_state.failed_urls and not args.skip_failed_retry:
                 retry_pdf_files, retry_processed_urls = _interactive_retry_failed_urls(
-                    context, progress_state.failed_urls, args, base_url_normalized, timeout_config
+                    context, progress_state.failed_urls, args, base_url_normalized, timeout_config, url_blacklist_patterns
                 )
                 
                 # 合并重试成功的文件
