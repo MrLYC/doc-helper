@@ -20,12 +20,12 @@ omit = [
 
 
 [tool.poetry]
-name = "project-name"
+name = "doc-helper"
 version = "0.1.0"
-description = "A template Poetry project structure."
+description = "网页文档转PDF爬虫工具，支持自动抓取网站内容并生成PDF文档"
 
 packages = [
-    { include = "project_name", from = "src" },
+    { include = "pdf_helper", from = "src" },
 ]
 
 authors = ["MrLYC <github@m.mrlyc.com>"]
@@ -35,15 +35,19 @@ include = []
 license = "MIT"
 readme = "README.md"
 
-homepage = "https://pypi.org/project/project-name/"
-repository = "https://github.com/Diapolo10/project-name"
-documentation = "https://github.com/Diapolo10/project-name/tree/main/docs"
+homepage = "https://github.com/MrLYC/doc-helper"
+repository = "https://github.com/MrLYC/doc-helper"
+documentation = "https://github.com/MrLYC/doc-helper/tree/main/docs"
 
 keywords = [
     "python3",
+    "pdf",
+    "web-crawler",
+    "documentation",
+    "playwright",
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3.9",
@@ -51,38 +55,24 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: Implementation :: CPython",
-    "Programming Language :: Python :: Implementation :: PyPy",
     "Typing :: Typed",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Text Processing :: Markup :: HTML",
+    "Topic :: Office/Business :: Office Suites",
 ]
 
 
 [tool.poetry.dependencies]
 python = "^3.9.0"
-python-dotenv = "^1.1.1"
-tomli = { version = "^2.2.1", python = "<3.11" }
-weasyprint = "^66.0"
-pypdf2 = "^3.0.1"
-sentry-sdk = "^2.34.1"
 playwright = "^1.54.0"
+pypdf2 = "^3.0.1"
 
+[tool.poetry.group.dev]
+optional = true
 
 [tool.poetry.group.dev.dependencies]
 mypy = "^1.17.1"
-
-
-[tool.poetry.group.linters]
-optional = true
-
-
-[tool.poetry.group.linters.dependencies]
 ruff = "^0.12.8"
-
-
-[tool.poetry.group.tests]
-optional = true
-
-
-[tool.poetry.group.tests.dependencies]
 pytest = "^8.4.1"
 pytest-cov = "^6.2.1"
 tox = "^4.28.4"
@@ -124,7 +114,7 @@ target-version = "py311"
 
 
 [tool.ruff.lint.flake8-copyright]
-author = "Lari Liuhamo"
+author = "MrLYC"
 
 
 [tool.ruff.lint.flake8-quotes]
