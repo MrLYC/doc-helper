@@ -18,6 +18,7 @@ Doc Helper 是一个基于 Python 的网页文档转PDF爬虫工具。项目使�
 - **CI/CD**: GitHub Actions + Tox
 
 ## 开发规范
+- 代码需要保证可读性和可维护性，有合理的日志打印，圈复杂度不应该超过 10
 
 ### 依赖管理
 - 使用 Poetry 管理所有依赖
