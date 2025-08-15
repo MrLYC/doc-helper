@@ -1225,7 +1225,7 @@ def _initialize_or_resume_progress(base_url_normalized, output_file, max_depth, 
     return progress_state, False
 
 def _crawl_pages_with_progress(context, args, base_url_normalized, url_pattern, url_blacklist_patterns, 
-                              timeout_config, progress_state: ProgressState):
+                              timeout_config, progress_state: ProgressState, domain_failure_tracker):
     """执行页面爬取逻辑，支持进度恢复和流水线并行处理"""
     
     logger.info(f"开始/继续爬取，最大深度: {args.max_depth}")
@@ -1239,16 +1239,16 @@ def _crawl_pages_with_progress(context, args, base_url_normalized, url_pattern, 
     if args.parallel_pages > 1:
         return _crawl_pages_pipeline(
             context, args, base_url_normalized, url_pattern, url_blacklist_patterns,
-            timeout_config, progress_state
+            timeout_config, progress_state, domain_failure_tracker
         )
     else:
         return _crawl_pages_serial(
             context, args, base_url_normalized, url_pattern, url_blacklist_patterns,
-            timeout_config, progress_state
+            timeout_config, progress_state, domain_failure_tracker
         )
 
 def _crawl_pages_serial(context, args, base_url_normalized, url_pattern, url_blacklist_patterns,
-                       timeout_config, progress_state: ProgressState):
+                       timeout_config, progress_state: ProgressState, domain_failure_tracker):
     """串行处理模式（兼容原有逻辑）"""
     logger.info("启用串行处理模式，创建持久页面用于重用")
     
