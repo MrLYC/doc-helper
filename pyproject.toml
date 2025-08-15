@@ -22,11 +22,8 @@ omit = [
 [tool.poetry]
 name = "doc-helper"
 version = "0.1.0"
-description = "网页文档转PDF爬虫工具，支持自动抓取网站内容并生成PDF文档"
-
-packages = [
-    { include = "pdf_helper", from = "src" },
-]
+description = ""
+package-mode = false
 
 authors = ["MrLYC <github@m.mrlyc.com>"]
 maintainers = ["MrLYC <github@m.mrlyc.com>"]
@@ -77,6 +74,7 @@ pytest = "^8.4.1"
 pytest-cov = "^6.2.1"
 tox = "^4.28.4"
 tox-gh-actions = "^3.3.0"
+black = "^25.1.0"
 
 
 [[tool.poetry.source]]

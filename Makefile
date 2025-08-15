@@ -1,6 +1,6 @@
 # Inspired by: https://blog.mathieu-leplatre.info/tips-for-your-makefile-with-python.html
 
-PYMODULE := project_name
+PYMODULE := pdf_helper
 TESTS := tests
 INSTALL_STAMP := .install.stamp
 POETRY := $(shell command -v poetry 2> /dev/null)
@@ -28,24 +28,25 @@ install: $(INSTALL_STAMP)
 $(INSTALL_STAMP): pyproject.toml
 	@if [ -z $(POETRY) ]; then echo "Poetry could not be found. See https://python-poetry.org/docs/"; exit 2; fi
 	$(POETRY) run pip install --upgrade pip setuptools
-	$(POETRY) install --with dev,tests,linters
+	$(POETRY) install --with dev
 	touch $(INSTALL_STAMP)
 
 .PHONY: lint
 lint: $(INSTALL_STAMP)
-    # Configured in pyproject.toml
-    # Skips mypy if not installed
-    # 
-    # $(POETRY) run black --check $(TESTS) $(PYMODULE) --diff
+	# Configured in pyproject.toml
+	# Skips mypy if not installed
+	# 
+	# $(POETRY) run black --check $(TESTS) $(PYMODULE) --diff
 	@if [ -z $(MYPY) ]; then echo "Mypy not found, skipping..."; else echo "Running Mypy..."; $(POETRY) run mypy $(PYMODULE) $(TESTS); fi
-	@echo "Running Ruff..."; $(POETRY) run ruff . --fix
+	@echo "Running Ruff..."; $(POETRY) run ruff check . --fix
+	@echo "Running Black..."; $(POETRY) run black $(TESTS) $(PYMODULE)
 
 .PHONY: test
 test: $(INSTALL_STAMP)
-    # Configured in pyproject.toml
+	# Configured in pyproject.toml
 	$(POETRY) run pytest
 
 .PHONY: clean
 clean:
-    # Delete all files in .gitignore
+	# Delete all files in .gitignore
 	git clean -Xdf
