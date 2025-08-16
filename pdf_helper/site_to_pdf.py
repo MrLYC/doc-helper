@@ -2331,7 +2331,7 @@ def _create_argument_parser():
     parser.add_argument("-o", "--output-pdf", required=True, help="输出PDF路径")
 
     # URL过滤相关参数
-    parser.add_argument("--url-pattern", default=None, help="URL匹配模式正则表达式")
+    parser.add_argument("-p", "--url-pattern", default=None, help="URL匹配模式正则表达式")
     parser.add_argument(
         "-b", "--url-blacklist",
         action="append",
@@ -2339,7 +2339,9 @@ def _create_argument_parser():
             "https://analytics.twitter.com/",
             "https://connect.facebook.net/",
             "https://t.co/",
-            "https://www.google-analytics.com/"
+            "https://www.google-analytics.com/",
+            "https://www.google.com/ccm/collect",
+            "https://img.youtube.com/",
         ],
         help="URL黑名单模式正则表达式，可指定多个，阻止浏览器加载匹配的URL",
     )
@@ -2373,9 +2375,9 @@ def _create_argument_parser():
     # 重试和流控参数
     parser.add_argument("--skip-failed-retry", action="store_true", help="跳过失败URL的交互式重试，直接处理成功的页面")
     parser.add_argument(
-        "--parallel-pages",
+        "-P", "--parallel-pages",
         type=int,
-        default=2,
+        default=4,
         help="并行页面数量，同时打开多个标签页预加载提高处理速度。1=串行处理，2+=真正并行处理",
     )
     parser.add_argument(
