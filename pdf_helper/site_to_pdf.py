@@ -2068,12 +2068,16 @@ def _handle_page_result(
         logger.info(f"📊 从当前页面发现 {new_links_count} 个新链接，队列总数: {len(progress_state.queue)}")
 
 
-def _prompt_user_choice(failed_urls):
+def _prompt_user_choice(failed_urls, unattended=False):
     """提示用户选择重试方式"""
     print(f"\n=== 发现 {len(failed_urls)} 个失败的URL ===")
     for i, (url, reason) in enumerate(failed_urls, 1):
         print(f"{i}. {url}")
         print(f"   失败原因: {reason}")
+
+    if unattended:
+        print("\n无人值守模式：自动跳过所有失败的URL")
+        return "3"
 
     while True:
         try:
@@ -2094,7 +2098,7 @@ def _prompt_user_choice(failed_urls):
             return "3"
 
 
-def _get_urls_to_retry(choice, failed_urls):
+def _get_urls_to_retry(choice, failed_urls, unattended=False):
     """根据用户选择获取要重试的URL列表"""
     if choice == "3":
         logger.info("用户选择跳过所有失败的URL")
@@ -2102,6 +2106,9 @@ def _get_urls_to_retry(choice, failed_urls):
     if choice == "1":
         return [url for url, _ in failed_urls]
     if choice == "2":
+        if unattended:
+            print("无人值守模式：自动跳过选择性重试")
+            return []
         urls_to_retry = []
         for i, (url, reason) in enumerate(failed_urls, 1):
             retry_choice = input(f"重试 URL {i}: {url} ? (y/n): ").strip().lower()
@@ -2111,8 +2118,12 @@ def _get_urls_to_retry(choice, failed_urls):
     return []
 
 
-def _get_retry_count():
+def _get_retry_count(unattended=False):
     """获取重试次数"""
+    if unattended:
+        print("无人值守模式：使用默认重试次数 3")
+        return 3
+    
     while True:
         try:
             retry_count = input("重试次数 (1-10, 默认3): ").strip()
@@ -2175,15 +2186,15 @@ def _interactive_retry_failed_urls(
         return [], []
 
     # 获取用户选择
-    choice = _prompt_user_choice(failed_urls)
-    urls_to_retry = _get_urls_to_retry(choice, failed_urls)
+    choice = _prompt_user_choice(failed_urls, args.yes)
+    urls_to_retry = _get_urls_to_retry(choice, failed_urls, args.yes)
 
     if not urls_to_retry:
         logger.info("没有选择要重试的URL")
         return [], []
 
     # 获取重试次数
-    retry_count = _get_retry_count()
+    retry_count = _get_retry_count(args.yes)
     if retry_count == 0:
         return [], []
 
@@ -2362,6 +2373,7 @@ def _create_argument_parser():
     parser.add_argument("-d", "--debug", action="store_true", help="启用调试模式，保存页面截图")
     parser.add_argument("--debug-dir", default="debug_screenshots", help="调试截图保存目录")
     parser.add_argument("-v", "--verbose", action="store_true", help="显示浏览器界面，便于观察处理过程")
+    parser.add_argument("-y", "--yes", action="store_true", help="无人值守模式，所有需要用户输入的地方都使用默认值")
 
     # 加载策略参数
     parser.add_argument("--fast-load", action="store_true", help="快速加载模式，跳过网络空闲等待")
