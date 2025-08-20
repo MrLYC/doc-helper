@@ -149,19 +149,19 @@ class TrueParallelProcessor:
         
         if load_strategy == "fast":
             # Fast模式：快速检查元素是否可见，利用预加载优势
-            logger.info("快速加载模式：跳过网络空闲等待，但持续等待元素可见")
+            logger.info("快速加载模式：跳过页面加载等待，但持续等待元素可见")
             return wait_for_element_visible(page, content_selector, timeout_config, "fast")
         
         elif load_strategy == "thorough":
-            # Thorough模式：等待网络空闲后再检查元素
-            logger.info("彻底加载模式：等待完全的网络空闲，然后持续等待元素可见")
+            # Thorough模式：等待页面加载后再检查元素
+            logger.info("彻底加载模式：等待完全的页面加载，然后持续等待元素可见")
             
-            # 首先等待网络空闲
+            # 首先等待页面加载
             try:
-                page.wait_for_load_state("networkidle", timeout=timeout_config.base_timeout * 1000)
+                page.wait_for_load_state("load", timeout=timeout_config.base_timeout * 1000)
                 logger.info("网络已达到空闲状态")
             except PlaywrightTimeoutError:
-                logger.warning("网络空闲等待超时，继续等待元素可见")
+                logger.warning("页面加载等待超时，继续等待元素可见")
                 # 在thorough模式下，记录还在加载的慢请求（如果有的话）
                 # 注意：并行模式下我们不维护slow_requests，所以跳过这个日志
             
@@ -222,8 +222,9 @@ class TrueParallelProcessor:
         page_state = self.page_states[slot_index]
         if page_state and page_state.page:
             try:
-                # 添加超时机制，防止页面关闭时卡住
-                page_state.page.close()
+                if not page_state.is_closed():
+                    # 添加超时机制，防止页面关闭时卡住
+                    page_state.page.close()
                 logger.debug(f"🔄 槽位[{slot_index}] 页面已关闭: {page_state.url}")
             except Exception as e:
                 logger.debug(f"关闭槽位[{slot_index}]页面时出错: {e}")
@@ -811,20 +812,20 @@ def _setup_slow_request_monitoring(page, timeout_config: TimeoutConfig):
 
 def _apply_fast_load_strategy(page, content_selector, timeout_config):
     """应用快速加载策略"""
-    logger.info("快速加载模式：跳过网络空闲等待，但持续等待元素可见")
+    logger.info("快速加载模式：跳过页面加载等待，但持续等待元素可见")
     return wait_for_element_visible(page, content_selector, timeout_config, "fast")
 
 
 def _apply_thorough_load_strategy(page, content_selector, timeout_config, slow_requests):
     """应用彻底加载策略"""
-    logger.info("彻底加载模式：等待完全的网络空闲，然后持续等待元素可见")
+    logger.info("彻底加载模式：等待页面加载完成，然后持续等待元素可见")
 
-    # 首先等待网络空闲
+    # 首先等待页面加载完成
     try:
-        page.wait_for_load_state("networkidle", timeout=timeout_config.base_timeout * 1000)
-        logger.info("网络已达到空闲状态")
+        page.wait_for_load_state("load", timeout=timeout_config.base_timeout * 1000)
+        logger.info("页面已加载完成")
     except PlaywrightTimeoutError:
-        logger.warning("网络空闲等待超时，继续等待元素可见")
+        logger.warning("页面加载等待超时，继续等待元素可见")
         # 在thorough模式下，打印还在加载的慢请求
         _log_ongoing_slow_requests(slow_requests)
 
@@ -2462,12 +2463,12 @@ def _create_argument_parser():
     parser.add_argument("-y", "--yes", action="store_true", help="无人值守模式，所有需要用户输入的地方都使用默认值")
 
     # 加载策略参数
-    parser.add_argument("--fast-load", action="store_true", help="快速加载模式，跳过网络空闲等待")
+    parser.add_argument("--fast-load", action="store_true", help="快速加载模式，跳过页面加载等待")
     parser.add_argument(
         "--load-strategy",
         choices=["fast", "normal", "thorough"],
         default="thorough",
-        help="页面加载策略：fast=仅等待DOM, normal=智能等待, thorough=完全等待网络空闲",
+        help="页面加载策略：fast=仅等待DOM, normal=智能等待, thorough=完全等待页面加载",
     )
 
     # 重试和流控参数
