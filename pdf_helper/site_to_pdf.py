@@ -2068,16 +2068,17 @@ def _handle_page_result(
         logger.info(f"📊 从当前页面发现 {new_links_count} 个新链接，队列总数: {len(progress_state.queue)}")
 
 
-def _prompt_user_choice(failed_urls, unattended=False):
+def _prompt_user_choice(failed_urls, yes_mode=False):
     """提示用户选择重试方式"""
     print(f"\n=== 发现 {len(failed_urls)} 个失败的URL ===")
     for i, (url, reason) in enumerate(failed_urls, 1):
         print(f"{i}. {url}")
         print(f"   失败原因: {reason}")
 
-    if unattended:
-        print("\n无人值守模式：自动跳过所有失败的URL")
-        return "3"
+    # 在 yes 模式下自动选择重试所有
+    if yes_mode:
+        print("\n检测到 -y/--yes 参数，自动重试所有失败的URL")
+        return "1"
 
     while True:
         try:
@@ -2098,7 +2099,7 @@ def _prompt_user_choice(failed_urls, unattended=False):
             return "3"
 
 
-def _get_urls_to_retry(choice, failed_urls, unattended=False):
+def _get_urls_to_retry(choice, failed_urls):
     """根据用户选择获取要重试的URL列表"""
     if choice == "3":
         logger.info("用户选择跳过所有失败的URL")
@@ -2106,9 +2107,6 @@ def _get_urls_to_retry(choice, failed_urls, unattended=False):
     if choice == "1":
         return [url for url, _ in failed_urls]
     if choice == "2":
-        if unattended:
-            print("无人值守模式：自动跳过选择性重试")
-            return []
         urls_to_retry = []
         for i, (url, reason) in enumerate(failed_urls, 1):
             retry_choice = input(f"重试 URL {i}: {url} ? (y/n): ").strip().lower()
@@ -2118,10 +2116,10 @@ def _get_urls_to_retry(choice, failed_urls, unattended=False):
     return []
 
 
-def _get_retry_count(unattended=False):
+def _get_retry_count(yes_mode=False):
     """获取重试次数"""
-    if unattended:
-        print("无人值守模式：使用默认重试次数 3")
+    if yes_mode:
+        print("检测到 -y/--yes 参数：使用默认重试次数 3")
         return 3
     
     while True:
@@ -2173,6 +2171,66 @@ def _retry_single_url(retry_page, url, args, base_url_normalized, timeout_config
     return None, url, False
 
 
+def _auto_retry_failed_urls(
+    context, failed_urls, args, base_url_normalized, timeout_config, url_blacklist_patterns, domain_failure_tracker
+):
+    """自动重试失败的URL，无需用户交互"""
+    if not failed_urls:
+        return [], []
+
+    logger.info(f"开始自动重试 {len(failed_urls)} 个失败的URL，重试次数: 3")
+
+    # 自动重试时总是使用串行模式，避免复杂性
+    retry_page = context.new_page()
+    logger.info("为自动重试创建专用页面（串行模式）")
+
+    try:
+        retry_pdf_files = []
+        retry_processed_urls = []
+        still_failed_urls = []
+
+        for i, (url, reason) in enumerate(failed_urls, 1):
+            logger.info(f"🔄 自动重试进度: [{i}/{len(failed_urls)}] 处理: {url}")
+
+            pdf_path, processed_url, success = _retry_single_url(
+                retry_page,
+                url,
+                args,
+                base_url_normalized,
+                timeout_config,
+                url_blacklist_patterns,
+                3,  # 固定重试3次
+            )
+
+            if success:
+                retry_pdf_files.append(pdf_path)
+                retry_processed_urls.append(processed_url)
+            else:
+                still_failed_urls.append((url, "自动重试后仍然失败"))
+
+    finally:
+        # 确保重试页面被正确关闭
+        try:
+            retry_page.close()
+            logger.info("已关闭自动重试专用页面")
+        except Exception as close_err:
+            logger.warning(f"关闭自动重试页面时出错: {close_err!s}")
+
+    # 重试结果统计
+    retry_success_count = len(retry_processed_urls)
+    retry_failed_count = len(still_failed_urls)
+    logger.info("\n📊 自动重试结果统计:")
+    logger.info(f"   重试成功: {retry_success_count} 个")
+    logger.info(f"   重试后仍失败: {retry_failed_count} 个")
+
+    if still_failed_urls:
+        logger.warning(f"仍有 {len(still_failed_urls)} 个URL自动重试后依然失败:")
+        for url, reason in still_failed_urls:
+            logger.warning(f"  - {url}: {reason}")
+
+    return retry_pdf_files, retry_processed_urls
+
+
 def _interactive_retry_failed_urls(
     context, failed_urls, args, base_url_normalized, timeout_config, url_blacklist_patterns, domain_failure_tracker
 ):
@@ -2180,14 +2238,9 @@ def _interactive_retry_failed_urls(
     if not failed_urls:
         return [], []
 
-    # 如果启用了跳过失败重试选项，直接返回
-    if args.skip_failed_retry:
-        logger.info("启用了跳过失败重试选项，直接处理成功的页面")
-        return [], []
-
     # 获取用户选择
     choice = _prompt_user_choice(failed_urls, args.yes)
-    urls_to_retry = _get_urls_to_retry(choice, failed_urls, args.yes)
+    urls_to_retry = _get_urls_to_retry(choice, failed_urls)
 
     if not urls_to_retry:
         logger.info("没有选择要重试的URL")
@@ -2198,11 +2251,11 @@ def _interactive_retry_failed_urls(
     if retry_count == 0:
         return [], []
 
-    logger.info(f"开始重试 {len(urls_to_retry)} 个失败的URL，重试次数: {retry_count}")
+    logger.info(f"开始交互式重试 {len(urls_to_retry)} 个失败的URL，重试次数: {retry_count}")
 
     # 重试时总是使用串行模式，避免复杂性
     retry_page = context.new_page()
-    logger.info("为重试创建专用页面（串行模式）")
+    logger.info("为交互式重试创建专用页面（串行模式）")
 
     try:
         retry_pdf_files = []
@@ -2210,7 +2263,7 @@ def _interactive_retry_failed_urls(
         still_failed_urls = []
 
         for i, url in enumerate(urls_to_retry, 1):
-            logger.info(f"🔄 重试进度: [{i}/{len(urls_to_retry)}] 处理: {url}")
+            logger.info(f"🔄 交互式重试进度: [{i}/{len(urls_to_retry)}] 处理: {url}")
 
             pdf_path, processed_url, success = _retry_single_url(
                 retry_page,
@@ -2226,25 +2279,25 @@ def _interactive_retry_failed_urls(
                 retry_pdf_files.append(pdf_path)
                 retry_processed_urls.append(processed_url)
             else:
-                still_failed_urls.append((url, "重试后仍然失败"))
+                still_failed_urls.append((url, "交互式重试后仍然失败"))
 
     finally:
         # 确保重试页面被正确关闭
         try:
             retry_page.close()
-            logger.info("已关闭重试专用页面")
+            logger.info("已关闭交互式重试专用页面")
         except Exception as close_err:
-            logger.warning(f"关闭重试页面时出错: {close_err!s}")
+            logger.warning(f"关闭交互式重试页面时出错: {close_err!s}")
 
     # 重试结果统计
     retry_success_count = len(retry_processed_urls)
     retry_failed_count = len(still_failed_urls)
-    logger.info("\n📊 重试结果统计:")
+    logger.info("\n📊 交互式重试结果统计:")
     logger.info(f"   重试成功: {retry_success_count} 个")
     logger.info(f"   重试后仍失败: {retry_failed_count} 个")
 
     if still_failed_urls:
-        logger.warning(f"仍有 {len(still_failed_urls)} 个URL重试后依然失败:")
+        logger.warning(f"仍有 {len(still_failed_urls)} 个URL交互式重试后依然失败:")
         for url, reason in still_failed_urls:
             logger.warning(f"  - {url}: {reason}")
 
@@ -2385,7 +2438,6 @@ def _create_argument_parser():
     )
 
     # 重试和流控参数
-    parser.add_argument("--skip-failed-retry", action="store_true", help="跳过失败URL的交互式重试，直接处理成功的页面")
     parser.add_argument(
         "-P", "--parallel-pages",
         type=int,
@@ -2561,17 +2613,31 @@ def _execute_crawling_workflow(
         domain_failure_tracker,
     )
 
-    # 如果有失败的URL，询问是否重试
-    if progress_state.failed_urls and not args.skip_failed_retry:
-        retry_pdf_files, retry_processed_urls = _interactive_retry_failed_urls(
-            context,
-            progress_state.failed_urls,
-            args,
-            base_url_normalized,
-            timeout_config,
-            url_blacklist_patterns,
-            domain_failure_tracker,
-        )
+    # 如果有失败的URL，根据设置选择重试方式
+    if progress_state.failed_urls:
+        if args.auto_retry_failed:
+            # 自动重试模式：自动重试所有失败的URL 3次
+            logger.info("启用自动重试模式，将重试所有失败的URL 3次")
+            retry_pdf_files, retry_processed_urls = _auto_retry_failed_urls(
+                context,
+                progress_state.failed_urls,
+                args,
+                base_url_normalized,
+                timeout_config,
+                url_blacklist_patterns,
+                domain_failure_tracker,
+            )
+        else:
+            # 交互式重试模式：询问用户是否重试
+            retry_pdf_files, retry_processed_urls = _interactive_retry_failed_urls(
+                context,
+                progress_state.failed_urls,
+                args,
+                base_url_normalized,
+                timeout_config,
+                url_blacklist_patterns,
+                domain_failure_tracker,
+            )
 
         # 合并重试成功的文件
         progress_state.pdf_files.extend(retry_pdf_files)
