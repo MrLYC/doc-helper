@@ -49,13 +49,21 @@ class URL:
             raise ValueError("URL不能为空")
         
         parsed = urlparse(self.url)
-        if not parsed.scheme or not parsed.netloc:
+        if not parsed.scheme:
+            raise ValueError(f"无效的URL格式: {self.url}")
+        
+        # file:// 协议不需要 netloc，其他协议需要
+        if parsed.scheme != 'file' and not parsed.netloc:
             raise ValueError(f"无效的URL格式: {self.url}")
     
     @property
     def domain(self) -> str:
         """获取域名"""
-        return urlparse(self.url).netloc
+        parsed = urlparse(self.url)
+        # file:// 协议返回 'localhost' 作为域名
+        if parsed.scheme == 'file':
+            return 'localhost'
+        return parsed.netloc
     
     @property
     def path(self) -> str:
