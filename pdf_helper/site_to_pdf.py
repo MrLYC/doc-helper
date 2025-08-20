@@ -114,35 +114,66 @@ class TrueParallelProcessor:
         try:
             logger.info(f"⏳ 槽位[{slot_index}] 完成页面加载: {page_state.url}")
             
-            # 设置请求拦截
+            # 设置请求拦截和监控（页面已经通过goto预加载过了）
             _setup_request_blocking(page_state.page, url_blacklist_patterns)
-            
-            # 设置慢请求监控
             _setup_slow_request_monitoring(page_state.page, timeout_config)
             
-            # 完成页面加载
-            final_url = _handle_page_loading_with_retries(
+            # 根据加载策略直接等待元素，不重新加载页面
+            success = self._apply_parallel_load_strategy(
                 page_state.page,
-                page_state.url,
                 args.content_selector,
                 timeout_config,
-                args.max_retries,
-                args.verbose,
-                args.load_strategy,
-                url_blacklist_patterns,
+                args.load_strategy
             )
             
-            page_state.is_loading = False
-            page_state.is_loaded = True
-            page_state.final_url = final_url
-            logger.info(f"✅ 槽位[{slot_index}] 加载完成: {page_state.url}")
-            return True
+            if success:
+                page_state.is_loading = False
+                page_state.is_loaded = True
+                page_state.final_url = page_state.page.url  # 使用当前页面URL
+                logger.info(f"✅ 槽位[{slot_index}] 加载完成: {page_state.url}")
+                return True
+            else:
+                page_state.load_error = f"{args.load_strategy}模式加载失败：元素不可见"
+                logger.warning(f"❌ 槽位[{slot_index}] 加载失败: {page_state.url} - 元素不可见")
+                return False
             
         except Exception as e:
             page_state.is_loading = False
             page_state.load_error = str(e)
             logger.warning(f"❌ 槽位[{slot_index}] 加载失败: {page_state.url} - {e!s}")
             return False
+
+    def _apply_parallel_load_strategy(self, page, content_selector, timeout_config, load_strategy):
+        """在并行模式下应用加载策略，页面已经预加载过"""
+        logger.info(f"应用{load_strategy}加载策略（并行模式，页面已预加载）")
+        
+        if load_strategy == "fast":
+            # Fast模式：快速检查元素是否可见，利用预加载优势
+            logger.info("快速加载模式：跳过网络空闲等待，但持续等待元素可见")
+            return wait_for_element_visible(page, content_selector, timeout_config, "fast")
+        
+        elif load_strategy == "thorough":
+            # Thorough模式：等待网络空闲后再检查元素
+            logger.info("彻底加载模式：等待完全的网络空闲，然后持续等待元素可见")
+            
+            # 首先等待网络空闲
+            try:
+                page.wait_for_load_state("networkidle", timeout=timeout_config.base_timeout * 1000)
+                logger.info("网络已达到空闲状态")
+            except PlaywrightTimeoutError:
+                logger.warning("网络空闲等待超时，继续等待元素可见")
+                # 在thorough模式下，记录还在加载的慢请求（如果有的话）
+                # 注意：并行模式下我们不维护slow_requests，所以跳过这个日志
+            
+            # 然后等待元素可见（使用剩余时间）
+            remaining_timeout = max(timeout_config.base_timeout // 2, timeout_config.thorough_min_timeout)
+            timeout_config_remaining = TimeoutConfig(remaining_timeout)
+            return wait_for_element_visible(page, content_selector, timeout_config_remaining, "thorough")
+        
+        else:  # normal模式
+            # Normal模式：直接等待元素可见
+            logger.info("正常加载模式：直接等待元素可见")
+            return wait_for_element_visible(page, content_selector, timeout_config, "normal")
 
     def _process_page_content(self, slot_index: int, args, base_url_normalized, timeout_config, progress_state):
         """处理页面内容并生成PDF"""
@@ -1889,6 +1920,7 @@ def _crawl_pages_parallel(
             
             if page_state is None:
                 # 当前槽位空闲，尝试加载新URL
+                logger.info(f"槽位[{current_slot}] 空闲，尝试加载新URL")
                 if progress_state.queue:
                     url, depth = progress_state.queue.popleft()
                     if url not in progress_state.visited_urls and depth <= args.max_depth:
@@ -1972,6 +2004,7 @@ def _crawl_pages_parallel(
             # 尝试为当前槽位加载新URL
             if progress_state.queue:
                 url, depth = progress_state.queue.popleft()
+                logger.info(f"加载新URL到槽位[{current_slot}]: {url} (深度: {depth})")
                 if url not in progress_state.visited_urls and depth <= args.max_depth:
                     processor._start_page_loading(
                         current_slot, url, depth, args, timeout_config,
