@@ -17,8 +17,9 @@ from pdf_helper.protocol import (
 class MockPageProcessor:
     """模拟页面处理器"""
     
-    def __init__(self, name: str, states: list = None):
+    def __init__(self, name: str, states: list = None, priority: int = 50):
         self.name = name
+        self.priority = priority
         self.states = states or [ProcessorState.WAITING, ProcessorState.READY, ProcessorState.COMPLETED]
         self.state_index = 0
         self._state = ProcessorState.WAITING
@@ -44,7 +45,7 @@ class MockPageProcessor:
     
     async def run(self, context):
         self.run_called += 1
-        self._state = ProcessorState.COMPLETED
+        # 注意：不再在run方法中设置状态，由Manager负责
     
     async def finish(self, context):
         self.finish_called += 1
@@ -67,10 +68,10 @@ class TestChromiumManager:
     def processor_factories(self):
         """创建处理器工厂函数"""
         def factory1():
-            return MockPageProcessor("loader")
+            return MockPageProcessor("loader", priority=10)
         
         def factory2():
-            return MockPageProcessor("extractor")
+            return MockPageProcessor("extractor", priority=20)
         
         return [factory1, factory2]
     

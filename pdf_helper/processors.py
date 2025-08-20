@@ -18,8 +18,15 @@ logger = logging.getLogger(__name__)
 class PageLoadProcessor(PageProcessor):
     """页面加载处理器，确保页面完全加载"""
     
-    def __init__(self, name: str):
-        super().__init__(name)
+    def __init__(self, name: str, priority: int = 10):
+        """
+        初始化页面加载处理器
+        
+        Args:
+            name: 处理器名称  
+            priority: 优先级，默认为10（最高优先级）
+        """
+        super().__init__(name, priority)
         self._load_completed = False
     
     async def detect(self, context: PageContext) -> ProcessorState:
@@ -43,7 +50,7 @@ class PageLoadProcessor(PageProcessor):
         """执行页面加载处理"""
         logger.info(f"页面加载完成: {context.url.url}")
         self._load_completed = True
-        self._set_state(ProcessorState.COMPLETED)
+        # 注意：不要在这里设置状态，Manager会负责状态管理
         
         # 保存页面基本信息到上下文
         context.data["title"] = await context.page.title()
@@ -59,8 +66,16 @@ class PageLoadProcessor(PageProcessor):
 class ContentExtractProcessor(PageProcessor):
     """内容提取处理器，提取页面主要内容"""
     
-    def __init__(self, name: str, content_selector: str = "body"):
-        super().__init__(name)
+    def __init__(self, name: str, content_selector: str = "body", priority: int = 20):
+        """
+        初始化内容提取处理器
+        
+        Args:
+            name: 处理器名称
+            content_selector: 内容选择器
+            priority: 优先级，默认为20（依赖页面加载）
+        """
+        super().__init__(name, priority)
         self.content_selector = content_selector
         self._content_extracted = False
     
@@ -110,7 +125,7 @@ class ContentExtractProcessor(PageProcessor):
             context.data["content_length"] = len(text_content)
             
             self._content_extracted = True
-            self._set_state(ProcessorState.COMPLETED)
+            # 注意：不要在这里设置状态，Manager会负责状态管理
             logger.info(f"内容提取完成: {context.url.url}, 长度: {len(text_content)}")
             
         except Exception as e:
@@ -126,8 +141,16 @@ class ContentExtractProcessor(PageProcessor):
 class PDFGenerateProcessor(PageProcessor):
     """PDF生成处理器，将页面转换为PDF"""
     
-    def __init__(self, name: str, output_dir: str = "/tmp"):
-        super().__init__(name)
+    def __init__(self, name: str, output_dir: str = "/tmp", priority: int = 40):
+        """
+        初始化PDF生成处理器
+        
+        Args:
+            name: 处理器名称
+            output_dir: 输出目录
+            priority: 优先级，默认为40（依赖内容提取）
+        """
+        super().__init__(name, priority)
         self.output_dir = output_dir
         self._pdf_generated = False
     
@@ -172,7 +195,7 @@ class PDFGenerateProcessor(PageProcessor):
             context.data["pdf_generated"] = True
             
             self._pdf_generated = True
-            self._set_state(ProcessorState.COMPLETED)
+            # 注意：不要在这里设置状态，Manager会负责状态管理
             logger.info(f"PDF生成完成: {context.url.url} -> {pdf_path}")
             
         except Exception as e:
@@ -188,8 +211,16 @@ class PDFGenerateProcessor(PageProcessor):
 class LinkExtractProcessor(PageProcessor):
     """链接提取处理器，提取页面中的链接"""
     
-    def __init__(self, name: str, link_selector: str = "a[href]"):
-        super().__init__(name)
+    def __init__(self, name: str, link_selector: str = "a[href]", priority: int = 30):
+        """
+        初始化链接提取处理器
+        
+        Args:
+            name: 处理器名称
+            link_selector: 链接选择器
+            priority: 优先级，默认为30（依赖页面加载）
+        """
+        super().__init__(name, priority)
         self.link_selector = link_selector
         self._links_extracted = False
     
@@ -250,8 +281,16 @@ class LinkExtractProcessor(PageProcessor):
 class ScreenshotProcessor(PageProcessor):
     """截图处理器，为页面生成截图"""
     
-    def __init__(self, name: str, output_dir: str = "/tmp"):
-        super().__init__(name)
+    def __init__(self, name: str, output_dir: str = "/tmp", priority: int = 50):
+        """
+        初始化截图处理器
+        
+        Args:
+            name: 处理器名称
+            output_dir: 输出目录
+            priority: 优先级，默认为50（依赖页面加载）
+        """
+        super().__init__(name, priority)
         self.output_dir = output_dir
         self._screenshot_taken = False
     

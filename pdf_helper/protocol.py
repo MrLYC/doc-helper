@@ -28,6 +28,7 @@ class ProcessorState(Enum):
     """页面处理器状态枚举"""
     WAITING = "waiting"      # 等待中
     READY = "ready"          # 已就绪
+    RUNNING = "running"      # 运行中
     COMPLETED = "completed"  # 已完成
     FINISHED = "finished"    # 已结束
     CANCELLED = "cancelled"  # 已取消
@@ -236,19 +237,33 @@ class PageContext:
     def add_processor(self, processor: 'PageProcessor') -> None:
         """添加页面处理器"""
         self.processors[processor.name] = processor
+    
+    def get_processors_by_priority(self, reverse: bool = False) -> List['PageProcessor']:
+        """
+        按优先级获取处理器列表
+        
+        Args:
+            reverse: 是否反序排列，False为升序（优先级高的在前），True为降序
+            
+        Returns:
+            按优先级排序的处理器列表
+        """
+        return sorted(self.processors.values(), key=lambda p: p.priority, reverse=reverse)
 
 
 class PageProcessor(ABC):
     """页面处理器抽象基类"""
     
-    def __init__(self, name: str):
+    def __init__(self, name: str, priority: int = 50):
         """
         初始化页面处理器
         
         Args:
             name: 处理器名称
+            priority: 处理器优先级，数值越小优先级越高，默认为50
         """
         self.name = name
+        self.priority = priority
         self._state = ProcessorState.WAITING
         self._last_detect_time = 0.0
     

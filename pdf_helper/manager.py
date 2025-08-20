@@ -319,13 +319,48 @@ class ChromiumManager(PageManager):
         has_waiting_processors = False
         completed_processors = []
         
-        # 4. 遍历每个页面的未执行过的处理器
-        for processor_name, processor in context.processors.items():
+        # 按优先级升序获取处理器列表
+        processors_by_priority = context.get_processors_by_priority(reverse=False)
+        
+        # 4. 遍历每个页面的未执行过的处理器（按优先级顺序）
+        for processor in processors_by_priority:
+            processor_name = processor.name
             if processor_name in cancelled_processors:
                 continue
             
             try:
-                # 检测处理器状态
+                # 如果处理器处于RUNNING状态，直接调用run方法
+                if processor.state == ProcessorState.RUNNING:
+                    logger.debug(f"继续执行运行中的处理器 {processor_name} for {context.url.url}")
+                    
+                    # 在verbose模式下更新页面标题
+                    if self.verbose:
+                        try:
+                            await context.page.evaluate(f'''() => {{
+                                document.title = "[运行中 {processor_name}...] " + document.title.replace(/^\\[.*?\\] /, "");
+                            }}''')
+                        except:
+                            pass
+                    
+                    run_start = time.time()
+                    await processor.run(context)
+                    run_duration = time.time() - run_start
+                    
+                    # 运行完成后设置为COMPLETED状态
+                    processor._set_state(ProcessorState.COMPLETED)
+                    
+                    # 记录处理器完成的指标
+                    self.processor_state_counter.labels(
+                        processor_name=processor_name,
+                        state="completed",
+                        result="success"
+                    ).inc()
+                    
+                    logger.info(f"处理器 {processor_name} 运行完成 for {context.url.url} (耗时: {run_duration:.3f}s)")
+                    completed_processors.append(processor)
+                    continue
+                
+                # 对于非RUNNING状态的处理器，先检测状态
                 detect_start = time.time()
                 new_state = await asyncio.wait_for(
                     processor.detect(context),
@@ -341,8 +376,16 @@ class ChromiumManager(PageManager):
                 ).inc()
                 
                 if new_state == ProcessorState.READY:
-                    # 执行处理器
-                    logger.info(f"执行处理器 {processor_name} for {context.url.url}")
+                    # 执行处理器 - 设置为RUNNING状态
+                    processor._set_state(ProcessorState.RUNNING)
+                    logger.info(f"开始执行处理器 {processor_name} for {context.url.url}")
+                    
+                    # 记录RUNNING状态
+                    self.processor_state_counter.labels(
+                        processor_name=processor_name,
+                        state="running",
+                        result="success"
+                    ).inc()
                     
                     # 在verbose模式下更新页面标题
                     if self.verbose:
@@ -375,6 +418,10 @@ class ChromiumManager(PageManager):
                     ).inc()
                     
                 elif new_state == ProcessorState.WAITING:
+                    has_waiting_processors = True
+                    
+                elif new_state == ProcessorState.RUNNING:
+                    # RUNNING状态的处理器也需要继续等待处理
                     has_waiting_processors = True
                     
             except asyncio.TimeoutError:
@@ -439,22 +486,47 @@ class ChromiumManager(PageManager):
     
     async def _process_cleanup_queue(self) -> None:
         """处理清理队列"""
+        # 按URL分组处理器
+        url_processors = {}
         for item in list(self._cleanup_queue):
             try:
                 url_id, processor_name = item.split(':', 1)
-                context = self._active_pages.get(url_id)
-                if context:
-                    processor = context.get_processor(processor_name)
-                    if processor and processor.state == ProcessorState.COMPLETED:
-                        await processor.finish(context)
-                        processor._set_state(ProcessorState.FINISHED)
-                        logger.debug(f"处理器 {processor_name} 清理完成 for {context.url.url}")
-                
-                self._cleanup_queue.discard(item)
-                
+                if url_id not in url_processors:
+                    url_processors[url_id] = []
+                url_processors[url_id].append((item, processor_name))
             except Exception as e:
-                logger.error(f"清理处理器失败 {item}: {e}")
+                logger.error(f"解析清理项失败 {item}: {e}")
                 self._cleanup_queue.discard(item)
+        
+        # 对每个URL的处理器按优先级降序处理finish
+        for url_id, items in url_processors.items():
+            context = self._active_pages.get(url_id)
+            if not context:
+                # 如果上下文不存在，直接移除清理项
+                for item, _ in items:
+                    self._cleanup_queue.discard(item)
+                continue
+            
+            # 获取需要清理的处理器并按优先级降序排序
+            processors_to_finish = []
+            for item, processor_name in items:
+                processor = context.get_processor(processor_name)
+                if processor and processor.state == ProcessorState.COMPLETED:
+                    processors_to_finish.append((item, processor))
+            
+            # 按优先级降序排序（高优先级的处理器最后finish）
+            processors_to_finish.sort(key=lambda x: x[1].priority, reverse=True)
+            
+            # 执行finish操作
+            for item, processor in processors_to_finish:
+                try:
+                    await processor.finish(context)
+                    processor._set_state(ProcessorState.FINISHED)
+                    logger.debug(f"处理器 {processor.name} 清理完成 for {context.url.url} (优先级: {processor.priority})")
+                    self._cleanup_queue.discard(item)
+                except Exception as e:
+                    logger.error(f"清理处理器失败 {processor.name}: {e}")
+                    self._cleanup_queue.discard(item)
     
     async def _close_page(self, url_id: str) -> None:
         """关闭页面并清理资源"""
