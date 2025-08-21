@@ -217,6 +217,10 @@ class URLCollection:
     def get_all_statuses(self) -> Dict[URLStatus, int]:
         """获取所有状态的URL数量统计"""
         return {status: len(urls) for status, urls in self._urls_by_status.items()}
+    
+    def get_all_urls(self) -> List[URL]:
+        """获取所有URL对象列表"""
+        return list(self._urls_by_id.values())
 
 
 @dataclass

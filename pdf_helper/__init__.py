@@ -38,6 +38,8 @@ from .pdf_merger import (
     create_merger
 )
 
+from .server import main as run_server
+
 __version__ = "1.0.0"
 
 __all__ = [
@@ -74,4 +76,6 @@ __all__ = [
     # 工具函数
     "create_file_collection",
     "create_simple_collection",
+    # 服务器
+    "run_server",
 ]
