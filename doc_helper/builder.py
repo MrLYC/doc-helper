@@ -52,6 +52,8 @@ class PageProcessingBuilder:
         self._page_timeout: float = 60.0
         self._poll_interval: float = 1.0
         self._detect_timeout: float = 5.0
+        self._network_idle_timeout: float = 3.0
+        self._screenshot_timeout: float = 10.0
         self._headless: bool = True
         self._processors: List[Any] = []
         self._request_monitor: Optional[RequestMonitor] = None
@@ -186,6 +188,34 @@ class PageProcessingBuilder:
         """
         self._detect_timeout = timeout
         logger.info(f"设置检测超时时间: {timeout}秒")
+        return self
+    
+    def set_network_idle_timeout(self, timeout: float) -> 'PageProcessingBuilder':
+        """
+        设置网络空闲超时时间
+        
+        Args:
+            timeout: 网络空闲超时时间（秒）
+            
+        Returns:
+            PageProcessingBuilder: 当前构建器实例
+        """
+        self._network_idle_timeout = timeout
+        logger.info(f"设置网络空闲超时时间: {timeout}秒")
+        return self
+    
+    def set_screenshot_timeout(self, timeout: float) -> 'PageProcessingBuilder':
+        """
+        设置截图超时时间
+        
+        Args:
+            timeout: 截图超时时间（秒）
+            
+        Returns:
+            PageProcessingBuilder: 当前构建器实例
+        """
+        self._screenshot_timeout = timeout
+        logger.info(f"设置截图超时时间: {timeout}秒")
         return self
     
     def set_retry_callback(self, callback: RetryCallback) -> 'PageProcessingBuilder':
@@ -425,6 +455,8 @@ class PageProcessingBuilder:
                 page_timeout=self._page_timeout,
                 poll_interval=self._poll_interval,
                 detect_timeout=self._detect_timeout,
+                network_idle_timeout=self._network_idle_timeout,
+                screenshot_timeout=self._screenshot_timeout,
                 headless=self._headless
             )
         
@@ -435,6 +467,7 @@ class PageProcessingBuilder:
         page_monitor = PageMonitor(
             name="page_monitor",
             page_timeout=self._page_timeout,
+            network_idle_timeout=self._network_idle_timeout,
             priority=0
         )
         processor_factories.append(lambda: page_monitor)

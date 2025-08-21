@@ -40,6 +40,9 @@ from .url_collection import SimpleCollection
 
 logger = logging.getLogger(__name__)
 
+# 全局默认超时配置（秒）
+DEFAULT_GLOBAL_TIMEOUT = 600  # 全局默认超时，页面加载并处理完成的最大超时时间
+
 # 全局变量
 manager: Optional[ChromiumManager] = None
 processing_task: Optional[asyncio.Task] = None
@@ -85,9 +88,11 @@ class ServerConfig:
         
         # 页面处理配置
         self.concurrent_tabs: int = 3
-        self.page_timeout: float = 60.0
-        self.poll_interval: float = 1.0
-        self.detect_timeout: float = 5.0
+        self.page_timeout: float = DEFAULT_GLOBAL_TIMEOUT / 2  # 页面加载超时为全局超时的一半
+        self.poll_interval: float = DEFAULT_GLOBAL_TIMEOUT / 60  # 轮询间隔为全局超时的1/60
+        self.detect_timeout: float = DEFAULT_GLOBAL_TIMEOUT / 120  # 检测超时为全局超时的1/120
+        self.network_idle_timeout: float = DEFAULT_GLOBAL_TIMEOUT / 200  # 网络空闲超时
+        self.screenshot_timeout: float = DEFAULT_GLOBAL_TIMEOUT / 60  # 截图超时
         self.headless: bool = True
         self.verbose: bool = False
         
@@ -223,22 +228,36 @@ def create_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-t", "--page-timeout",
         type=float,
-        default=600.0,
-        help="页面超时时间（秒） (默认: 600.0)"
+        default=DEFAULT_GLOBAL_TIMEOUT / 2,
+        help=f"页面超时时间（秒） (默认: {DEFAULT_GLOBAL_TIMEOUT / 2})"
     )
     
     parser.add_argument(
         "--poll-interval",
         type=float,
-        default=3.0,
-        help="轮询间隔（秒） (默认: 3 .0)"
+        default=DEFAULT_GLOBAL_TIMEOUT / 60,
+        help=f"轮询间隔（秒） (默认: {DEFAULT_GLOBAL_TIMEOUT / 60})"
     )
     
     parser.add_argument(
         "--detect-timeout",
         type=float,
-        default=5.0,
-        help="检测超时时间（秒） (默认: 5.0)"
+        default=DEFAULT_GLOBAL_TIMEOUT / 120,
+        help=f"检测超时时间（秒） (默认: {DEFAULT_GLOBAL_TIMEOUT / 120})"
+    )
+    
+    parser.add_argument(
+        "--network-idle-timeout",
+        type=float,
+        default=DEFAULT_GLOBAL_TIMEOUT / 200,
+        help=f"网络空闲超时时间（秒） (默认: {DEFAULT_GLOBAL_TIMEOUT / 200})"
+    )
+    
+    parser.add_argument(
+        "--screenshot-timeout",
+        type=float,
+        default=DEFAULT_GLOBAL_TIMEOUT / 60,
+        help=f"截图超时时间（秒） (默认: {DEFAULT_GLOBAL_TIMEOUT / 60})"
     )
     
     parser.add_argument(
@@ -444,6 +463,8 @@ def parse_config_from_args(args: argparse.Namespace) -> ServerConfig:
     config.page_timeout = args.page_timeout
     config.poll_interval = args.poll_interval
     config.detect_timeout = args.detect_timeout
+    config.network_idle_timeout = args.network_idle_timeout
+    config.screenshot_timeout = args.screenshot_timeout
     config.headless = not args.verbose  # verbose 模式下使用非无头模式
     config.verbose = args.verbose
     
@@ -531,6 +552,8 @@ def create_manager_from_config(config: ServerConfig) -> ChromiumManager:
                .set_page_timeout(config.page_timeout)
                .set_poll_interval(config.poll_interval)
                .set_detect_timeout(config.detect_timeout)
+               .set_network_idle_timeout(config.network_idle_timeout)
+               .set_screenshot_timeout(config.screenshot_timeout)
                .set_headless(config.headless)
                .set_verbose(config.verbose))
     

@@ -337,6 +337,8 @@ class PageManagerConfig:
     poll_interval: float = 1.0             # 轮询间隔（秒）
     page_timeout: float = 60.0             # 页面超时时间（秒）
     detect_timeout: float = 5.0            # 检测超时时间（秒）
+    network_idle_timeout: float = 3.0      # 网络空闲超时时间（秒）
+    screenshot_timeout: float = 10.0       # 截图超时时间（秒）
     headless: bool = True                  # 是否使用无头模式
 
 

@@ -185,7 +185,7 @@ class ChromiumManager(PageManager):
             
             # 等待页面加载完成
             try:
-                await context.page.wait_for_load_state("networkidle", timeout=3000)
+                await context.page.wait_for_load_state("networkidle", timeout=int(self.config.network_idle_timeout * 1000))
                 logger.info(f"页面网络空闲状态确认 (slot={slot})")
             except Exception as e:
                 logger.warning(f"等待页面网络空闲状态超时，继续截图 (slot={slot}): {e}")
@@ -195,7 +195,7 @@ class ChromiumManager(PageManager):
             screenshot_bytes = await context.page.screenshot(
                 type="png",
                 full_page=True,
-                timeout=10000  # 增加到10秒超时
+                timeout=int(self.config.screenshot_timeout * 1000)  # 转换为毫秒
             )
             
             logger.info(f"截图成功，大小: {len(screenshot_bytes)} bytes (slot={slot})")

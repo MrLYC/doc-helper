@@ -152,18 +152,20 @@ pdf_exporter_processing_time = Histogram(
 class PageMonitor(PageProcessor):
     """页面监控处理器，监控页面加载状态、慢请求和失败请求"""
 
-    def __init__(self, name: str, page_timeout: float = 60.0, priority: int = 0):
+    def __init__(self, name: str, page_timeout: float = 60.0, network_idle_timeout: float = 5.0, priority: int = 0):
         """
         初始化页面监控处理器
 
         Args:
             name: 处理器名称
             page_timeout: 页面加载超时时间（秒）
+            network_idle_timeout: 网络空闲超时时间（秒）
             priority: 优先级，固定为0（最高优先级）
 
         """
         super().__init__(name, priority)
         self.page_timeout = page_timeout
+        self.network_idle_timeout = network_idle_timeout
         self.slow_request_timeout = page_timeout / 10  # 慢请求超时为页面超时的1/10
         self._page_state = "loading"  # loading, ready, completed
         self._request_start_times = {}  # 请求开始时间
@@ -271,8 +273,10 @@ class PageMonitor(PageProcessor):
         """DOM内容加载完成事件处理"""
         logger.debug(f"DOM内容加载完成: {self._context.url.url}")
 
-    async def _wait_for_network_idle(self, page, timeout: float = 5.0) -> bool:
+    async def _wait_for_network_idle(self, page, timeout: float = None) -> bool:
         """等待网络空闲状态"""
+        if timeout is None:
+            timeout = self.network_idle_timeout
         try:
             await page.wait_for_load_state("networkidle", timeout=timeout * 1000)
             return True
@@ -335,7 +339,7 @@ class PageMonitor(PageProcessor):
 
         # 检查网络空闲状态
         if self._page_state == "ready":
-            network_idle = await self._wait_for_network_idle(context.page, timeout=2.0)
+            network_idle = await self._wait_for_network_idle(context.page)
             if network_idle:
                 self._page_state = "completed"
                 context.data["page_state"] = "completed"
