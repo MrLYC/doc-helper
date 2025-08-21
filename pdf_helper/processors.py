@@ -6,13 +6,14 @@
 
 import logging
 import time
+import uuid
 from collections import defaultdict
 from urllib.parse import urlparse
 
 from playwright.async_api import Request, Response
 from prometheus_client import Counter, Gauge, Histogram
 
-from .protocol import PageContext, PageProcessor, ProcessorState
+from .protocol import PageContext, PageProcessor, ProcessorState, URL, URLCollection, URLStatus
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,48 @@ page_monitor_processing_time = Histogram(
 page_monitor_active_pages = Gauge(
     "page_monitor_active_pages",
     "当前活跃的页面监控数量",
+)
+
+# RequestMonitor Prometheus 指标
+request_monitor_blocked_urls = Counter(
+    "request_monitor_blocked_urls_total",
+    "被屏蔽的URL总数",
+    ["reason", "domain", "path"],
+)
+
+request_monitor_processing_time = Histogram(
+    "request_monitor_processing_seconds",
+    "请求监控处理时间",
+    buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0],
+)
+
+request_monitor_active_monitors = Gauge(
+    "request_monitor_active_monitors",
+    "当前活跃的请求监控数量",
+)
+
+# LinksFinder Prometheus 指标
+links_finder_discovered_links = Counter(
+    "links_finder_discovered_links_total",
+    "发现的链接总数",
+    ["domain", "source_domain"],
+)
+
+links_finder_valid_links = Counter(
+    "links_finder_valid_links_total",
+    "有效链接总数",
+    ["domain", "source_domain"],
+)
+
+links_finder_processing_time = Histogram(
+    "links_finder_processing_seconds",
+    "链接发现处理时间",
+    buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0],
+)
+
+links_finder_active_finders = Gauge(
+    "links_finder_active_finders",
+    "当前活跃的链接发现器数量",
 )
 
 
@@ -268,6 +311,414 @@ class PageMonitor(PageProcessor):
 
         except Exception as e:
             logger.error(f"页面监控清理失败: {e}")
+        finally:
+            self._set_state(ProcessorState.FINISHED)
+
+
+class RequestMonitor(PageProcessor):
+    """请求监控处理器，监控特殊请求并自动屏蔽问题URL"""
+
+    def __init__(
+        self,
+        name: str,
+        url_collection: URLCollection,
+        slow_request_threshold: int = 100,
+        failed_request_threshold: int = 10,
+        priority: int = 1,
+    ):
+        """
+        初始化请求监控处理器
+
+        Args:
+            name: 处理器名称
+            url_collection: URL集合，用于添加屏蔽的URL
+            slow_request_threshold: 慢请求数量阈值，默认100
+            failed_request_threshold: 失败请求数量阈值，默认10
+            priority: 优先级，固定为1
+
+        """
+        super().__init__(name, priority)
+        self.url_collection = url_collection
+        self.slow_request_threshold = slow_request_threshold
+        self.failed_request_threshold = failed_request_threshold
+        self._monitoring_started = False
+        self._start_time = None
+
+    def _remove_query_string(self, url: str) -> str:
+        """移除URL中的查询字符串"""
+        parsed = urlparse(url)
+        return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+
+    def _get_domain_path(self, url: str) -> tuple[str, str]:
+        """获取URL的域名和路径"""
+        parsed = urlparse(url)
+        domain = parsed.netloc or "unknown"
+        path = parsed.path or "/"
+        return domain, path
+
+    def _block_problematic_url(self, url: str, reason: str, context: PageContext) -> None:
+        """将问题URL添加到集合中并标记为已屏蔽"""
+        try:
+            # 生成唯一ID
+            url_id = f"blocked_{int(time.time())}_{hash(url) % 10000}"
+            
+            # 创建新的URL对象，状态为BLOCKED
+            blocked_url = URL(
+                id=url_id,
+                url=url,
+                category="blocked_by_request_monitor",
+                status=URLStatus.BLOCKED,
+            )
+            
+            # 添加到URL集合
+            added = self.url_collection.add(blocked_url)
+            
+            if added:
+                domain, path = self._get_domain_path(url)
+                logger.warning(f"屏蔽问题URL: {url}, 原因: {reason}")
+                
+                # 更新 Prometheus 指标
+                request_monitor_blocked_urls.labels(
+                    reason=reason,
+                    domain=domain,
+                    path=path,
+                ).inc()
+                
+                # 记录到上下文
+                if "blocked_urls" not in context.data:
+                    context.data["blocked_urls"] = []
+                context.data["blocked_urls"].append({
+                    "url": url,
+                    "reason": reason,
+                    "blocked_at": time.time(),
+                })
+            else:
+                logger.debug(f"URL已存在于集合中: {url}")
+                
+        except Exception as e:
+            logger.error(f"屏蔽URL失败 {url}: {e}")
+
+    async def detect(self, context: PageContext) -> ProcessorState:
+        """检测是否开始监控"""
+        # 在页面进入就绪状态时启动
+        page_state = context.data.get("page_state", "loading")
+        
+        if not self._monitoring_started and page_state in ("ready", "completed"):
+            return ProcessorState.READY
+        
+        # 如果已经开始监控但未完成，继续运行
+        if self._monitoring_started and page_state != "completed":
+            return ProcessorState.RUNNING
+        
+        # 页面进入完成状态，检查是否可以结束
+        if page_state == "completed":
+            # 检查是否有更高优先级的处理器在运行
+            running_processors = [
+                p
+                for p in context.processors.values()
+                if p.state == ProcessorState.RUNNING and p.priority < self.priority
+            ]
+            
+            if not running_processors:
+                return ProcessorState.COMPLETED
+            else:
+                return ProcessorState.RUNNING
+        
+        return ProcessorState.WAITING
+
+    async def run(self, context: PageContext) -> None:
+        """执行请求监控"""
+        if not self._monitoring_started:
+            # 初始化监控
+            self._monitoring_started = True
+            self._start_time = time.time()
+            
+            # 更新指标
+            request_monitor_active_monitors.inc()
+            
+            # 初始化上下文数据
+            context.data.setdefault("blocked_urls", [])
+            
+            logger.info(f"开始监控特殊请求: {context.url.url}")
+        
+        # 检查慢请求阈值
+        slow_requests = context.data.get("slow_requests", {})
+        for url, count in slow_requests.items():
+            if count >= self.slow_request_threshold:
+                self._block_problematic_url(
+                    url,
+                    f"慢请求次数过多({count}>={self.slow_request_threshold})",
+                    context,
+                )
+        
+        # 检查失败请求阈值
+        failed_requests = context.data.get("failed_requests", {})
+        for url, count in failed_requests.items():
+            if count >= self.failed_request_threshold:
+                self._block_problematic_url(
+                    url,
+                    f"失败请求次数过多({count}>={self.failed_request_threshold})",
+                    context,
+                )
+        
+        # 记录处理时间
+        if self._start_time:
+            processing_time = time.time() - self._start_time
+            request_monitor_processing_time.observe(processing_time)
+
+    async def finish(self, context: PageContext) -> None:
+        """清理请求监控"""
+        try:
+            # 更新指标
+            request_monitor_active_monitors.dec()
+            
+            # 记录统计信息
+            blocked_count = len(context.data.get("blocked_urls", []))
+            slow_count = sum(context.data.get("slow_requests", {}).values())
+            failed_count = sum(context.data.get("failed_requests", {}).values())
+            
+            logger.info(
+                f"请求监控完成: {context.url.url}, "
+                f"屏蔽URL: {blocked_count}, 慢请求: {slow_count}, 失败请求: {failed_count}"
+            )
+            
+        except Exception as e:
+            logger.error(f"请求监控清理失败: {e}")
+        finally:
+            self._set_state(ProcessorState.FINISHED)
+
+
+class LinksFinder(PageProcessor):
+    """链接发现处理器，寻找更多的链接并添加到URL集合中"""
+
+    def __init__(
+        self,
+        name: str,
+        url_collection: URLCollection,
+        css_selector: str = "body",
+        priority: int = 10,
+    ):
+        """
+        初始化链接发现处理器
+
+        Args:
+            name: 处理器名称
+            url_collection: URL集合，用于添加发现的链接
+            css_selector: CSS选择器，指定要搜索链接的容器
+            priority: 优先级，固定为10
+
+        """
+        super().__init__(name, priority)
+        self.url_collection = url_collection
+        self.css_selector = css_selector
+        self._ready_executed = False
+        self._completed_executed = False
+        self._start_time = None
+
+    def _get_domain_path(self, url: str) -> tuple[str, str]:
+        """获取URL的域名和路径"""
+        parsed = urlparse(url)
+        domain = parsed.netloc or "unknown"
+        path = parsed.path or "/"
+        return domain, path
+
+    def _is_valid_url(self, url: str) -> bool:
+        """检查URL是否有效"""
+        if not url or not isinstance(url, str):
+            return False
+        
+        url = url.strip()
+        if not url:
+            return False
+        
+        # 检查是否是HTTP/HTTPS协议
+        if not url.startswith(("http://", "https://")):
+            return False
+        
+        try:
+            parsed = urlparse(url)
+            return bool(parsed.netloc)
+        except Exception:
+            return False
+
+    def _generate_url_id(self, url: str) -> str:
+        """生成URL的唯一ID"""
+        import hashlib
+        # 使用URL的hash值和时间戳生成唯一ID
+        url_hash = hashlib.md5(url.encode()).hexdigest()[:8]
+        timestamp = int(time.time() * 1000) % 100000
+        return f"links_{timestamp}_{url_hash}"
+
+    async def _extract_links_from_container(self, page, container_selector: str, source_domain: str) -> list[str]:
+        """从指定容器中提取所有有效链接"""
+        try:
+            # 使用JavaScript在页面中提取链接
+            links = await page.evaluate(f"""
+                () => {{
+                    const container = document.querySelector('{container_selector}');
+                    if (!container) return [];
+                    
+                    const links = [];
+                    
+                    // 如果容器本身是a标签，添加它
+                    if (container.tagName === 'A' && container.href) {{
+                        links.push(container.href);
+                    }}
+                    
+                    // 查找容器下的所有a标签
+                    const aElements = container.querySelectorAll('a[href]');
+                    for (const a of aElements) {{
+                        if (a.href) {{
+                            links.push(a.href);
+                        }}
+                    }}
+                    
+                    return links;
+                }}
+            """)
+            
+            # 过滤和验证链接
+            valid_links = []
+            for link in links:
+                if self._is_valid_url(link):
+                    valid_links.append(link)
+                    
+                    # 更新指标
+                    link_domain, _ = self._get_domain_path(link)
+                    links_finder_valid_links.labels(
+                        domain=link_domain,
+                        source_domain=source_domain,
+                    ).inc()
+            
+            # 更新发现链接总数指标
+            total_discovered = len(links)
+            if total_discovered > 0:
+                links_finder_discovered_links.labels(
+                    domain="all",
+                    source_domain=source_domain,
+                ).inc(total_discovered)
+            
+            logger.info(f"从 {container_selector} 提取到 {len(valid_links)} 个有效链接（总共 {total_discovered} 个）")
+            return valid_links
+            
+        except Exception as e:
+            logger.error(f"提取链接失败: {e}")
+            return []
+
+    async def _add_links_to_collection(self, links: list[str], context: PageContext) -> int:
+        """将链接添加到URL集合中"""
+        added_count = 0
+        
+        for link in links:
+            try:
+                # 生成唯一ID
+                url_id = self._generate_url_id(link)
+                
+                # 创建URL对象
+                url_obj = URL(
+                    id=url_id,
+                    url=link,
+                    category="discovered_by_links_finder",
+                    status=URLStatus.PENDING,  # 标记为待访问
+                )
+                
+                # 添加到URL集合
+                added = self.url_collection.add(url_obj)
+                if added:
+                    added_count += 1
+                    logger.debug(f"添加新链接: {link}")
+                else:
+                    logger.debug(f"链接已存在: {link}")
+                    
+            except Exception as e:
+                logger.error(f"添加链接失败 {link}: {e}")
+        
+        # 记录到上下文
+        if "discovered_links" not in context.data:
+            context.data["discovered_links"] = []
+        
+        context.data["discovered_links"].extend([
+            {
+                "url": link,
+                "discovered_at": time.time(),
+                "selector": self.css_selector,
+            } for link in links
+        ])
+        
+        logger.info(f"成功添加 {added_count} 个新链接到URL集合")
+        return added_count
+
+    async def detect(self, context: PageContext) -> ProcessorState:
+        """检测是否开始链接发现"""
+        # 在页面进入就绪状态时启动
+        page_state = context.data.get("page_state", "loading")
+        
+        if page_state in ("ready", "completed"):
+            return ProcessorState.READY
+        
+        return ProcessorState.WAITING
+
+    async def run(self, context: PageContext) -> None:
+        """执行链接发现"""
+        if not self._start_time:
+            self._start_time = time.time()
+            links_finder_active_finders.inc()
+            logger.info(f"开始链接发现: {context.url.url}")
+        
+        page_state = context.data.get("page_state", "loading")
+        source_domain, _ = self._get_domain_path(context.url.url)
+        
+        # 在页面就绪状态执行一次
+        if page_state == "ready" and not self._ready_executed:
+            logger.info(f"页面就绪状态 - 执行链接发现: {context.url.url}")
+            
+            links = await self._extract_links_from_container(
+                context.page, 
+                self.css_selector, 
+                source_domain
+            )
+            
+            if links:
+                await self._add_links_to_collection(links, context)
+            
+            self._ready_executed = True
+        
+        # 在页面完成状态执行一次
+        if page_state == "completed" and not self._completed_executed:
+            logger.info(f"页面完成状态 - 执行链接发现: {context.url.url}")
+            
+            links = await self._extract_links_from_container(
+                context.page, 
+                self.css_selector, 
+                source_domain
+            )
+            
+            if links:
+                await self._add_links_to_collection(links, context)
+            
+            self._completed_executed = True
+            
+            # 标记执行完成
+            logger.info(f"链接发现完成: {context.url.url}")
+        
+        # 记录处理时间
+        if self._start_time:
+            processing_time = time.time() - self._start_time
+            links_finder_processing_time.observe(processing_time)
+
+    async def finish(self, context: PageContext) -> None:
+        """清理链接发现处理器"""
+        try:
+            # 更新指标
+            links_finder_active_finders.dec()
+            
+            # 记录统计信息
+            discovered_count = len(context.data.get("discovered_links", []))
+            
+            logger.info(f"链接发现完成: {context.url.url}, 发现链接: {discovered_count}")
+            
+        except Exception as e:
+            logger.error(f"链接发现清理失败: {e}")
         finally:
             self._set_state(ProcessorState.FINISHED)
 

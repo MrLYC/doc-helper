@@ -3,17 +3,23 @@
 """
 
 import pytest
+import time
 from unittest.mock import AsyncMock, Mock
 from collections import defaultdict
 
 from pdf_helper.processors import (
-    PageLoadProcessor, ContentExtractProcessor, PDFGenerateProcessor, PageMonitor
+    PageLoadProcessor, ContentExtractProcessor, PDFGenerateProcessor, PageMonitor, RequestMonitor
 )
-from pdf_helper.protocol import URL, PageContext, ProcessorState
+from pdf_helper.protocol import URL, URLCollection, URLStatus, PageContext, ProcessorState
 
 
 class TestProcessors:
     """处理器的测试"""
+    
+    @pytest.fixture
+    def mock_url_collection(self):
+        """创建模拟URL集合"""
+        return URLCollection()
     
     @pytest.fixture
     def mock_page_context(self):
@@ -240,7 +246,7 @@ class TestProcessors:
         await monitor._on_request(mock_request)
         assert mock_request.url in monitor._request_start_times
         
-        # 模拟慢响应（手动设置较早的开始时间）
+        # 模拟慢响应(手动设置较早的开始时间)
         import time
         monitor._request_start_times[mock_request.url] = time.time() - 2.0  # 2秒前
         
@@ -269,7 +275,7 @@ class TestProcessors:
     
     @pytest.mark.asyncio
     async def test_page_monitor_url_cleaning(self, mock_page_context):
-        """测试URL清理（移除查询字符串）"""
+        """测试URL清理功能"""
         monitor = PageMonitor("monitor")
         
         # 测试URL清理
@@ -314,6 +320,209 @@ class TestProcessors:
         
         result = await monitor._wait_for_network_idle(mock_page_context.page, timeout=1.0)
         assert result is False
+    
+    @pytest.mark.asyncio
+    async def test_request_monitor_initialization(self, mock_page_context, mock_url_collection):
+        """测试请求监控处理器初始化"""
+        monitor = RequestMonitor(
+            "request_monitor",
+            url_collection=mock_url_collection,
+            slow_request_threshold=50,
+            failed_request_threshold=5
+        )
+        
+        # 测试初始状态
+        assert monitor.priority == 1
+        assert monitor.slow_request_threshold == 50
+        assert monitor.failed_request_threshold == 5
+        assert monitor.url_collection is mock_url_collection
+        assert not monitor._monitoring_started
+    
+    @pytest.mark.asyncio
+    async def test_request_monitor_detect_ready_state(self, mock_page_context, mock_url_collection):
+        """测试请求监控检测逻辑 - 页面就绪状态"""
+        monitor = RequestMonitor("request_monitor", url_collection=mock_url_collection)
+        
+        # 页面未就绪时应该等待
+        mock_page_context.data["page_state"] = "loading"
+        state = await monitor.detect(mock_page_context)
+        assert state == ProcessorState.WAITING
+        
+        # 页面就绪时应该开始
+        mock_page_context.data["page_state"] = "ready"
+        state = await monitor.detect(mock_page_context)
+        assert state == ProcessorState.READY
+        
+        # 页面完成时也应该开始
+        mock_page_context.data["page_state"] = "completed"
+        monitor._monitoring_started = False  # 重置状态
+        state = await monitor.detect(mock_page_context)
+        assert state == ProcessorState.READY
+    
+    @pytest.mark.asyncio
+    async def test_request_monitor_detect_running_state(self, mock_page_context, mock_url_collection):
+        """测试请求监控运行状态检测"""
+        monitor = RequestMonitor("request_monitor", url_collection=mock_url_collection)
+        monitor._monitoring_started = True
+        
+        # 监控已开始但页面未完成
+        mock_page_context.data["page_state"] = "ready"
+        state = await monitor.detect(mock_page_context)
+        assert state == ProcessorState.RUNNING
+        
+        # 页面完成且无更高优先级处理器
+        mock_page_context.data["page_state"] = "completed"
+        state = await monitor.detect(mock_page_context)
+        assert state == ProcessorState.COMPLETED
+    
+    @pytest.mark.asyncio
+    async def test_request_monitor_detect_with_higher_priority_processors(self, mock_page_context, mock_url_collection):
+        """测试请求监控与更高优先级处理器的交互"""
+        monitor = RequestMonitor("request_monitor", url_collection=mock_url_collection)
+        monitor._monitoring_started = True
+        
+        # 创建一个更高优先级(priority=0)的处理器
+        higher_priority_processor = Mock()
+        higher_priority_processor.state = ProcessorState.RUNNING
+        higher_priority_processor.priority = 0
+        
+        mock_page_context.processors["higher_priority"] = higher_priority_processor
+        mock_page_context.data["page_state"] = "completed"
+        
+        # 应该继续运行，等待更高优先级处理器完成
+        state = await monitor.detect(mock_page_context)
+        assert state == ProcessorState.RUNNING
+    
+    @pytest.mark.asyncio
+    async def test_request_monitor_run_initialization(self, mock_page_context, mock_url_collection):
+        """测试请求监控运行初始化"""
+        monitor = RequestMonitor("request_monitor", url_collection=mock_url_collection)
+        
+        # 运行监控
+        await monitor.run(mock_page_context)
+        
+        # 验证初始化
+        assert monitor._monitoring_started
+        assert "blocked_urls" in mock_page_context.data
+        assert isinstance(mock_page_context.data["blocked_urls"], list)
+    
+    @pytest.mark.asyncio
+    async def test_request_monitor_slow_request_blocking(self, mock_page_context, mock_url_collection):
+        """测试慢请求屏蔽功能"""
+        monitor = RequestMonitor(
+            "request_monitor",
+            url_collection=mock_url_collection,
+            slow_request_threshold=2,
+            failed_request_threshold=10
+        )
+        
+        # 设置慢请求数据
+        mock_page_context.data["slow_requests"] = defaultdict(int, {
+            "https://example.com/api/slow1": 3,  # 超过阈值
+            "https://example.com/api/slow2": 1,  # 未超过阈值
+        })
+        mock_page_context.data["failed_requests"] = defaultdict(int)
+        
+        # 运行监控
+        await monitor.run(mock_page_context)
+        
+        # 验证只有超过阈值的URL被屏蔽
+        blocked_urls = [item["url"] for item in mock_page_context.data.get("blocked_urls", [])]
+        assert "https://example.com/api/slow1" in blocked_urls
+        assert "https://example.com/api/slow2" not in blocked_urls
+        
+        # 验证URL被添加到集合中
+        assert mock_url_collection.count_by_status(URLStatus.BLOCKED) == 1
+    
+    @pytest.mark.asyncio
+    async def test_request_monitor_failed_request_blocking(self, mock_page_context, mock_url_collection):
+        """测试失败请求屏蔽功能"""
+        monitor = RequestMonitor(
+            "request_monitor",
+            url_collection=mock_url_collection,
+            slow_request_threshold=100,
+            failed_request_threshold=2
+        )
+        
+        # 设置失败请求数据
+        mock_page_context.data["slow_requests"] = defaultdict(int)
+        mock_page_context.data["failed_requests"] = defaultdict(int, {
+            "https://example.com/api/failed1": 3,  # 超过阈值
+            "https://example.com/api/failed2": 1,  # 未超过阈值
+        })
+        
+        # 运行监控
+        await monitor.run(mock_page_context)
+        
+        # 验证只有超过阈值的URL被屏蔽
+        blocked_urls = [item["url"] for item in mock_page_context.data.get("blocked_urls", [])]
+        assert "https://example.com/api/failed1" in blocked_urls
+        assert "https://example.com/api/failed2" not in blocked_urls
+        
+        # 验证URL被添加到集合中
+        assert mock_url_collection.count_by_status(URLStatus.BLOCKED) == 1
+    
+    @pytest.mark.asyncio
+    async def test_request_monitor_url_cleaning(self, mock_page_context, mock_url_collection):
+        """测试URL清理功能"""
+        monitor = RequestMonitor("request_monitor", url_collection=mock_url_collection)
+        
+        # 测试URL清理
+        original_url = "https://example.com/api/data?param1=value1&param2=value2"
+        cleaned_url = monitor._remove_query_string(original_url)
+        expected_url = "https://example.com/api/data"
+        assert cleaned_url == expected_url
+        
+        # 测试域名和路径提取
+        domain, path = monitor._get_domain_path(original_url)
+        assert domain == "example.com"
+        assert path == "/api/data"
+    
+    @pytest.mark.asyncio
+    async def test_request_monitor_block_problematic_url(self, mock_page_context, mock_url_collection):
+        """测试问题URL屏蔽功能"""
+        monitor = RequestMonitor("request_monitor", url_collection=mock_url_collection)
+        
+        test_url = "https://example.com/problematic"
+        test_reason = "测试屏蔽"
+        
+        # 屏蔽URL
+        monitor._block_problematic_url(test_url, test_reason, mock_page_context)
+        
+        # 验证URL被添加到集合
+        assert mock_url_collection.count_by_status(URLStatus.BLOCKED) == 1
+        
+        # 验证被屏蔽的URL信息
+        blocked_urls = mock_url_collection.get_by_status(URLStatus.BLOCKED)
+        assert len(blocked_urls) == 1
+        assert blocked_urls[0].url == test_url
+        assert blocked_urls[0].category == "blocked_by_request_monitor"
+        
+        # 验证上下文记录
+        assert "blocked_urls" in mock_page_context.data
+        blocked_items = mock_page_context.data["blocked_urls"]
+        assert len(blocked_items) == 1
+        assert blocked_items[0]["url"] == test_url
+        assert blocked_items[0]["reason"] == test_reason
+    
+    @pytest.mark.asyncio
+    async def test_request_monitor_finish(self, mock_page_context, mock_url_collection):
+        """Test request monitor cleanup"""
+        monitor = RequestMonitor("request_monitor", url_collection=mock_url_collection)
+        monitor._monitoring_started = True
+        
+        # Add test data
+        mock_page_context.data["blocked_urls"] = [
+            {"url": "https://example.com/test1", "reason": "slow request", "blocked_at": time.time()},
+            {"url": "https://example.com/test2", "reason": "failed request", "blocked_at": time.time()},
+        ]
+        mock_page_context.data["slow_requests"] = defaultdict(int, {"url1": 5})
+        mock_page_context.data["failed_requests"] = defaultdict(int, {"url2": 3})
+        
+        await monitor.finish(mock_page_context)
+        
+        # Verify cleanup
+        assert monitor.state == ProcessorState.FINISHED
 
 
 if __name__ == "__main__":
