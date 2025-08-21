@@ -107,6 +107,10 @@ class TestSnapshotAPI:
         mock_screenshot_data = b"fake_png_data"
         mock_page.screenshot.return_value = mock_screenshot_data
         
+        # 正确配置is_closed为同步方法
+        mock_page.is_closed = MagicMock(return_value=False)
+        mock_page.wait_for_load_state = AsyncMock()  # 配置为异步mock
+        
         url = URL(id="test", url="https://example.com")
         context = PageContext(page=mock_page, url=url)
         mock_manager._active_pages["test"] = context
@@ -119,7 +123,7 @@ class TestSnapshotAPI:
         mock_page.screenshot.assert_called_once_with(
             type="png",
             full_page=True,
-            timeout=5000
+            timeout=10000  # 更新为实际使用的超时时间
         )
 
     @pytest.mark.asyncio

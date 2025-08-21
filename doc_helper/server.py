@@ -230,8 +230,8 @@ def create_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--poll-interval",
         type=float,
-        default=1.0,
-        help="轮询间隔（秒） (默认: 1.0)"
+        default=3.0,
+        help="轮询间隔（秒） (默认: 3 .0)"
     )
     
     parser.add_argument(
@@ -724,11 +724,15 @@ async def get_active_pages(_: None = Depends(verify_auth_token)):
     """获取所有活跃页面的信息"""
     global manager
     
+    logger.info("收到获取活跃页面请求")
+    
     if not manager:
+        logger.error("Manager 未初始化")
         return {"status": "error", "message": "Manager 未初始化"}
     
     try:
         pages_info = manager.get_active_pages_info()
+        logger.info(f"返回 {len(pages_info)} 个页面信息")
         return {
             "status": "success", 
             "total_pages": len(pages_info),
@@ -739,23 +743,83 @@ async def get_active_pages(_: None = Depends(verify_auth_token)):
         return {"status": "error", "message": f"获取页面信息失败: {str(e)}"}
 
 
+@app.get("/debug")
+async def get_debug_info(_: None = Depends(verify_auth_token)):
+    """获取调试信息"""
+    global manager, processing_task
+    
+    logger.info("收到调试信息请求")
+    
+    debug_info = {
+        "manager_initialized": manager is not None,
+        "processing_task_active": processing_task is not None and not processing_task.done() if processing_task else False,
+        "server_uptime": time.time()
+    }
+    
+    if manager:
+        try:
+            pages_info = manager.get_active_pages_info()
+            debug_info.update({
+                "active_pages_count": len(pages_info),
+                "active_pages": pages_info
+            })
+            
+            # 获取URL集合状态
+            if hasattr(manager, 'url_collection'):
+                url_collection = manager.url_collection
+                debug_info["url_stats"] = {
+                    "pending": len(url_collection.get_by_status(URLStatus.PENDING)),
+                    "visited": len(url_collection.get_by_status(URLStatus.VISITED)),
+                    "failed": len(url_collection.get_by_status(URLStatus.FAILED)),
+                    "total": len(url_collection.get_all_urls())
+                }
+        except Exception as e:
+            debug_info["manager_error"] = str(e)
+    
+    return debug_info
+
+
 @app.get("/snapshot/{slot}")
 async def get_page_snapshot(slot: int, _: None = Depends(verify_auth_token)):
     """获取指定槽位页面的截图"""
     global manager
     
+    logger.info(f"收到截图请求，槽位: {slot}")
+    
     if not manager:
+        logger.error("Manager 未初始化")
         raise HTTPException(status_code=503, detail="Manager 未初始化")
     
     if slot < 0:
+        logger.error(f"无效的槽位号: {slot}")
         raise HTTPException(status_code=400, detail="槽位号不能为负数")
     
     try:
+        # 先获取页面信息来调试
+        pages_info = manager.get_active_pages_info()
+        logger.info(f"当前活跃页面数: {len(pages_info)}")
+        
+        if len(pages_info) == 0:
+            logger.warning("当前没有活跃页面")
+            raise HTTPException(
+                status_code=404, 
+                detail=f"当前没有活跃页面。请等待页面加载完成后重试。"
+            )
+        
+        if slot >= len(pages_info):
+            logger.warning(f"槽位 {slot} 超出范围，当前有 {len(pages_info)} 个页面")
+            raise HTTPException(
+                status_code=404, 
+                detail=f"槽位 {slot} 不存在。当前有 {len(pages_info)} 个页面 (槽位范围: 0-{len(pages_info)-1})"
+            )
+        
         screenshot_bytes = await manager.get_page_screenshot(slot)
         
         if screenshot_bytes is None:
-            raise HTTPException(status_code=404, detail=f"槽位 {slot} 不存在或截图失败")
+            logger.error(f"截图失败，槽位: {slot}")
+            raise HTTPException(status_code=500, detail=f"槽位 {slot} 截图失败，请稍后重试")
         
+        logger.info(f"截图成功，槽位: {slot}，大小: {len(screenshot_bytes)} bytes")
         return Response(
             content=screenshot_bytes,
             media_type="image/png",

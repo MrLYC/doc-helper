@@ -120,35 +120,87 @@ class ChromiumManager(PageManager):
     
     def get_active_pages_info(self) -> List[Dict[str, Any]]:
         """获取所有活跃页面的信息"""
+        logger.info(f"获取活跃页面信息，当前页面数: {len(self._active_pages)}")
+        
         pages_info = []
         for i, (url_id, context) in enumerate(self._active_pages.items()):
-            pages_info.append({
+            # 获取处理器状态
+            processor_states = {}
+            for proc_name, processor in context.processors.items():
+                processor_states[proc_name] = processor.state.value
+            
+            # 优先使用URL对象的title属性，如果没有则使用URL路径的最后部分
+            if hasattr(context.url, 'title') and context.url.title:
+                page_title = context.url.title
+            else:
+                page_title = context.url.url.split('/')[-1] or "页面"
+            
+            page_info = {
                 "slot": i,
                 "url_id": url_id,
                 "url": context.url.url,
-                "title": context.url.title or "未知",
+                "title": page_title,
                 "start_time": context.start_time,
-                "processors": list(context.processors.keys())
-            })
+                "elapsed_time": time.time() - context.start_time if hasattr(context, 'start_time') else 0,
+                "processors": list(context.processors.keys()),
+                "processor_states": processor_states,
+                "page_closed": context.page.is_closed() if context.page and hasattr(context.page, 'is_closed') else True
+            }
+            pages_info.append(page_info)
+            
+        logger.info(f"返回 {len(pages_info)} 个页面信息")
         return pages_info
     
     async def get_page_screenshot(self, slot: int) -> Optional[bytes]:
         """获取指定槽位页面的截图"""
+        logger.info(f"请求截图，槽位: {slot}, 当前活跃页面数: {len(self._active_pages)}")
+        
         active_pages = list(self._active_pages.items())
         
+        if len(active_pages) == 0:
+            logger.warning("没有活跃页面可截图")
+            return None
+        
         if slot < 0 or slot >= len(active_pages):
+            logger.warning(f"槽位 {slot} 超出范围 [0, {len(active_pages)-1}]")
             return None
         
         url_id, context = active_pages[slot]
+        logger.info(f"开始截图槽位 {slot}，URL: {context.url.url}")
         
         try:
+            # 检查页面是否可用，考虑测试环境中的mock对象
+            if not context.page:
+                logger.error(f"页面对象不存在 (slot={slot}, url_id={url_id})")
+                return None
+                
+            # 安全地检查页面是否已关闭
+            try:
+                if hasattr(context.page, 'is_closed') and context.page.is_closed():
+                    logger.error(f"页面已关闭 (slot={slot}, url_id={url_id})")
+                    return None
+            except Exception as e:
+                # 在测试环境中mock对象可能会抛出异常，继续处理
+                logger.debug(f"检查页面状态时出现异常，继续处理: {e}")
+            
+            # 等待页面加载完成
+            try:
+                await context.page.wait_for_load_state("networkidle", timeout=3000)
+                logger.info(f"页面网络空闲状态确认 (slot={slot})")
+            except Exception as e:
+                logger.warning(f"等待页面网络空闲状态超时，继续截图 (slot={slot}): {e}")
+            
             # 获取页面截图
+            logger.info(f"开始生成截图 (slot={slot})")
             screenshot_bytes = await context.page.screenshot(
                 type="png",
                 full_page=True,
-                timeout=5000  # 5秒超时
+                timeout=10000  # 增加到10秒超时
             )
+            
+            logger.info(f"截图成功，大小: {len(screenshot_bytes)} bytes (slot={slot})")
             return screenshot_bytes
+            
         except Exception as e:
             logger.error(f"获取页面截图失败 (slot={slot}, url_id={url_id}): {e}")
             return None
@@ -183,16 +235,36 @@ class ChromiumManager(PageManager):
                 await self._create_browser(p)
                 
                 try:
+                    loop_count = 0
                     while True:
                         try:
+                            loop_count += 1
+                            logger.debug(f"主循环第 {loop_count} 次迭代开始")
+                            
+                            # 记录当前状态
+                            pending_count = len(self.url_collection.get_by_status(URLStatus.PENDING))
+                            active_count = len(self._active_pages)
+                            logger.debug(f"当前状态 - pending URLs: {pending_count}, active pages: {active_count}")
+                            
                             # 2. 获取待访问的URLs并打开标签页
                             await self._open_new_tabs()
                             
                             # 如果没有活跃页面，检查是否需要重试
                             if not self._active_pages:
+                                logger.info(f"没有活跃页面，pending URLs: {pending_count}")
                                 if await self._handle_retry():
+                                    logger.info("重试逻辑返回True，继续循环")
                                     continue
                                 else:
+                                    logger.info("重试逻辑返回False或无重试，准备退出")
+                                    # 检查是否还有pending的URL
+                                    remaining_pending = len(self.url_collection.get_by_status(URLStatus.PENDING))
+                                    if remaining_pending > 0:
+                                        logger.warning(f"仍有 {remaining_pending} 个pending URL，但无活跃页面，可能存在问题")
+                                        # 继续尝试一段时间
+                                        if loop_count < 10:  # 最多尝试10次
+                                            await asyncio.sleep(2)  # 等待2秒再试
+                                            continue
                                     break
                             
                             # 3-6. 处理活跃页面
@@ -248,16 +320,26 @@ class ChromiumManager(PageManager):
                 'java_script_enabled': True,
                 'bypass_csp': True,
                 'extra_http_headers': {
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+                    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8,en-US;q=0.7',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1',
+                    'Sec-Fetch-Dest': 'document',
+                    'Sec-Fetch-Mode': 'navigate',
+                    'Sec-Fetch-Site': 'none',
+                    'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
                 }
             }
+            
+            logger.info(f"创建浏览器上下文，选项: {context_options}")
             
             self._context = await self._browser.new_context(**context_options)
             
             # 设置默认超时
-            self._context.set_default_timeout(self.config.page_timeout * 1000)
+            timeout_ms = self.config.page_timeout * 1000
+            self._context.set_default_timeout(timeout_ms)
+            logger.info(f"设置默认超时: {timeout_ms}ms ({self.config.page_timeout}s)")
             
             mode = "可视化" if self.verbose else "无头"
             logger.info(f"浏览器创建成功，模式: {mode}")
@@ -272,6 +354,7 @@ class ChromiumManager(PageManager):
         # 计算还能打开多少个标签页
         available_slots = self.config.max_concurrent_tabs - len(self._active_pages)
         if available_slots <= 0:
+            logger.debug("没有可用槽位，跳过打开新标签页")
             return
         
         # 获取待访问的URLs
@@ -282,36 +365,90 @@ class ChromiumManager(PageManager):
         )
         
         if not pending_urls:
+            logger.debug("没有待访问的URLs")
             return
         
-        logger.info(f"打开 {len(pending_urls)} 个新标签页")
+        logger.info(f"打开 {len(pending_urls)} 个新标签页，可用槽位: {available_slots}")
         
         # 为每个URL打开标签页并创建页面上下文
         for url in pending_urls:
+            start_time = time.time()
+            page = None
             try:
-                start_time = time.time()
+                logger.info(f"开始打开标签页: {url.url}")
+                
+                # 先将URL标记为正在处理，避免重复处理
+                # 注意：这里不改变URL状态，只是为了避免重复选择
+                
                 page = await self._context.new_page()
+                logger.info(f"新页面已创建: {url.url}")
                 
                 # 在verbose模式下，设置页面标题显示状态
                 if self.verbose:
-                    await page.evaluate(f'''() => {{
-                        document.title = "[正在加载...] {url.url}";
-                    }}''')
+                    try:
+                        await page.evaluate(f'''() => {{
+                            document.title = "[正在加载...] {url.url}";
+                        }}''')
+                    except Exception as e:
+                        logger.warning(f"设置页面标题失败: {e}")
                 
-                await page.goto(url.url, timeout=self.config.page_timeout * 1000)
+                # 设置页面超时和其他选项
+                logger.info(f"开始导航到页面: {url.url}, 超时: {self.config.page_timeout}s")
+                
+                # 先进行简单的网络测试
+                try:
+                    import aiohttp
+                    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                        async with session.head(url.url) as resp:
+                            logger.info(f"网络预检测成功: {url.url} 状态: {resp.status}")
+                except Exception as e:
+                    logger.warning(f"网络预检测失败 {url.url}: {e}，继续尝试浏览器加载")
+                
+                # 使用更详细的导航选项
+                try:
+                    # 先测试网络连接
+                    logger.info(f"测试网络连接: {url.url}")
+                    
+                    response = await page.goto(
+                        url.url, 
+                        timeout=self.config.page_timeout * 1000,
+                        wait_until="domcontentloaded"  # 等待DOM加载完成即可
+                    )
+                    
+                    if response:
+                        logger.info(f"页面响应状态: {response.status} for {url.url}")
+                        if response.status >= 400:
+                            raise Exception(f"HTTP错误: {response.status} {response.status_text}")
+                    else:
+                        logger.warning(f"页面响应为空: {url.url}")
+                        
+                except asyncio.TimeoutError as timeout_error:
+                    logger.error(f"页面加载超时 {url.url}: {timeout_error}")
+                    raise Exception(f"页面加载超时 ({self.config.page_timeout}s)")
+                except Exception as goto_error:
+                    logger.error(f"页面导航失败 {url.url}: {type(goto_error).__name__}: {goto_error}")
+                    raise goto_error
+                
+                logger.info(f"页面加载成功: {url.url}")
                 
                 # 创建页面上下文
                 context = PageContext(page=page, url=url)
                 context.start_time = start_time  # 记录开始时间
                 
                 # 创建页面处理器
+                logger.info(f"开始创建处理器 for {url.url}")
+                processor_count = 0
                 for factory in self.processor_factories:
                     try:
                         processor = factory()
                         context.add_processor(processor)
+                        processor_count += 1
+                        logger.debug(f"处理器 {processor.name} 已创建 for {url.url}")
                     except Exception as e:
                         logger.error(f"创建处理器失败 {url.url}: {e}")
                         self.error_counter.labels(error_type="processor_creation", component="manager").inc()
+                
+                logger.info(f"创建了 {processor_count} 个处理器 for {url.url}")
                 
                 self._active_pages[url.id] = context
                 self._cancelled_processors[url.id] = set()
@@ -319,17 +456,31 @@ class ChromiumManager(PageManager):
                 # 更新活跃页面数量指标
                 self.active_pages_gauge.set(len(self._active_pages))
                 
-                logger.info(f"标签页已打开: {url.url}")
+                elapsed_time = time.time() - start_time
+                logger.info(f"标签页已成功打开: {url.url} (耗时: {elapsed_time:.2f}s)")
                 
             except Exception as e:
-                logger.error(f"打开标签页失败 {url.url}: {e}")
+                logger.error(f"打开标签页失败 {url.url}: {type(e).__name__}: {e}")
+                
+                # 关闭已创建的页面
+                if page:
+                    try:
+                        await page.close()
+                        logger.info(f"已关闭失败的页面: {url.url}")
+                    except Exception as close_error:
+                        logger.error(f"关闭失败页面时出错: {close_error}")
+                
                 self.error_counter.labels(error_type="tab_opening", component="manager").inc()
                 self.url_collection.update_status(url.id, URLStatus.FAILED)
                 
                 # 记录失败的处理耗时
                 domain = self._get_domain_from_url(url.url)
-                elapsed_time = time.time() - start_time if 'start_time' in locals() else 0
+                elapsed_time = time.time() - start_time
                 self.page_processing_duration.labels(status="failed", url_domain=domain).observe(elapsed_time)
+                
+                logger.info(f"URL已标记为失败: {url.url}")
+        
+        logger.info(f"标签页打开完成，当前活跃页面数: {len(self._active_pages)}")
     
     async def _process_active_pages(self) -> None:
         """处理所有活跃页面"""
