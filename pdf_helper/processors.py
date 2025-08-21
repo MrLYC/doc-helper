@@ -54,6 +54,12 @@ request_monitor_blocked_urls = Counter(
     ["reason", "domain", "path"],
 )
 
+request_monitor_cancelled_requests = Counter(
+    "request_monitor_cancelled_requests_total", 
+    "被取消的请求总数",
+    ["reason", "domain", "path"],
+)
+
 request_monitor_processing_time = Histogram(
     "request_monitor_processing_seconds",
     "请求监控处理时间",
@@ -121,6 +127,25 @@ content_finder_elements_found = Counter(
     ['css_selector', 'found']
 )
 
+# PdfExporter 指标
+pdf_exporter_success_total = Counter(
+    'pdf_exporter_success_total',
+    'Total number of successful PDF exports',
+    ['format']
+)
+
+pdf_exporter_failed_total = Counter(
+    'pdf_exporter_failed_total',
+    'Total number of failed PDF exports',
+    ['reason']
+)
+
+pdf_exporter_processing_time = Histogram(
+    'pdf_exporter_processing_seconds',
+    'PdfExporter processing time',
+    buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0]
+)
+
 
 class PageMonitor(PageProcessor):
     """页面监控处理器，监控页面加载状态、慢请求和失败请求"""
@@ -158,12 +183,20 @@ class PageMonitor(PageProcessor):
     async def _on_request(self, request: Request) -> None:
         """请求开始事件处理"""
         self._request_start_times[request.url] = time.time()
+        
+        # 将请求信息共享给RequestMonitor
+        self._context.data.setdefault("pending_requests", {})[request.url] = request
+        
         logger.debug(f"请求开始: {request.url}")
 
     async def _on_response(self, response: Response) -> None:
         """响应事件处理"""
         request_url = response.request.url
         start_time = self._request_start_times.pop(request_url, None)
+        
+        # 从待处理请求中移除
+        pending_requests = self._context.data.get("pending_requests", {})
+        pending_requests.pop(request_url, None)
 
         if start_time:
             duration = time.time() - start_time
@@ -189,6 +222,10 @@ class PageMonitor(PageProcessor):
         """请求失败事件处理"""
         request_url = request.url
         self._request_start_times.pop(request_url, None)
+        
+        # 从待处理请求中移除
+        pending_requests = self._context.data.get("pending_requests", {})
+        pending_requests.pop(request_url, None)
 
         clean_url = self._remove_query_string(request_url)
         domain, path = self._get_domain_path(clean_url)
@@ -373,6 +410,8 @@ class RequestMonitor(PageProcessor):
         self.url_collection = url_collection
         self.slow_request_threshold = slow_request_threshold
         self.failed_request_threshold = failed_request_threshold
+        self.block_url_patterns = set()  # 存储需要屏蔽的URL模式
+        self._compiled_patterns = []  # 编译后的正则表达式模式
         self._monitoring_started = False
         self._start_time = None
 
@@ -389,46 +428,77 @@ class RequestMonitor(PageProcessor):
         return domain, path
 
     def _block_problematic_url(self, url: str, reason: str, context: PageContext) -> None:
-        """将问题URL添加到集合中并标记为已屏蔽"""
+        """将问题URL模式添加到屏蔽列表中"""
         try:
-            # 生成唯一ID
-            url_id = f"blocked_{int(time.time())}_{hash(url) % 10000}"
+            clean_url = self._remove_query_string(url)
+            domain, path = self._get_domain_path(clean_url)
             
-            # 创建新的URL对象，状态为BLOCKED
-            blocked_url = URL(
-                id=url_id,
-                url=url,
-                category="blocked_by_request_monitor",
-                status=URLStatus.BLOCKED,
-            )
+            # 添加到屏蔽模式集合
+            self.block_url_patterns.add(clean_url)
             
-            # 添加到URL集合
-            added = self.url_collection.add(blocked_url)
+            logger.warning(f"添加URL模式到屏蔽列表: {clean_url}, 原因: {reason}")
             
-            if added:
-                domain, path = self._get_domain_path(url)
-                logger.warning(f"屏蔽问题URL: {url}, 原因: {reason}")
-                
-                # 更新 Prometheus 指标
-                request_monitor_blocked_urls.labels(
-                    reason=reason,
-                    domain=domain,
-                    path=path,
-                ).inc()
-                
-                # 记录到上下文
-                if "blocked_urls" not in context.data:
-                    context.data["blocked_urls"] = []
-                context.data["blocked_urls"].append({
-                    "url": url,
-                    "reason": reason,
-                    "blocked_at": time.time(),
-                })
-            else:
-                logger.debug(f"URL已存在于集合中: {url}")
+            # 更新 Prometheus 指标
+            request_monitor_blocked_urls.labels(
+                reason=reason,
+                domain=domain,
+                path=path,
+            ).inc()
+            
+            # 记录到上下文
+            if "blocked_url_patterns" not in context.data:
+                context.data["blocked_url_patterns"] = []
+            context.data["blocked_url_patterns"].append({
+                "url_pattern": clean_url,
+                "reason": reason,
+                "blocked_at": time.time(),
+            })
                 
         except Exception as e:
-            logger.error(f"屏蔽URL失败 {url}: {e}")
+            logger.error(f"屏蔽URL模式失败 {url}: {e}")
+
+    def _matches_blocked_pattern(self, url: str) -> bool:
+        """检查URL是否匹配屏蔽模式"""
+        import re
+        
+        # 编译模式（如果还没编译）
+        if not self._compiled_patterns and self.block_url_patterns:
+            self._compiled_patterns = [re.compile(pattern) for pattern in self.block_url_patterns]
+        
+        # 检查URL是否匹配任何模式
+        for pattern in self._compiled_patterns:
+            if pattern.search(url):
+                return True
+        return False
+
+    async def _cancel_matching_requests(self, context: PageContext) -> int:
+        """取消匹配屏蔽模式的未完成请求"""
+        cancelled_count = 0
+        
+        # 从页面上下文获取当前的pending_requests
+        if hasattr(context.page, 'context') and hasattr(context.page.context, 'pending_requests'):
+            pending_requests = context.page.context.pending_requests
+        else:
+            return cancelled_count
+        
+        # 检查每个未完成的请求
+        requests_to_cancel = []
+        for request in pending_requests:
+            if hasattr(request, 'url') and hasattr(request, 'is_finished'):
+                if not request.is_finished() and self._matches_blocked_pattern(request.url):
+                    requests_to_cancel.append(request)
+        
+        # 取消匹配的请求
+        for request in requests_to_cancel:
+            try:
+                if hasattr(request, 'abort'):
+                    await request.abort()
+                    cancelled_count += 1
+                    logger.info(f"已取消匹配模式的请求: {request.url}")
+            except Exception as e:
+                logger.debug(f"取消请求失败 {request.url}: {e}")
+        
+        return cancelled_count
 
     async def detect(self, context: PageContext) -> ProcessorState:
         """检测是否开始监控"""
@@ -469,7 +539,7 @@ class RequestMonitor(PageProcessor):
             request_monitor_active_monitors.inc()
             
             # 初始化上下文数据
-            context.data.setdefault("blocked_urls", [])
+            context.data.setdefault("blocked_url_patterns", [])
             
             logger.info(f"开始监控特殊请求: {context.url.url}")
         
@@ -493,6 +563,11 @@ class RequestMonitor(PageProcessor):
                     context,
                 )
         
+        # 取消匹配屏蔽模式的未完成请求
+        cancelled_count = await self._cancel_matching_requests(context)
+        if cancelled_count > 0:
+            logger.info(f"取消了 {cancelled_count} 个匹配屏蔽模式的请求")
+        
         # 记录处理时间
         if self._start_time:
             processing_time = time.time() - self._start_time
@@ -505,13 +580,13 @@ class RequestMonitor(PageProcessor):
             request_monitor_active_monitors.dec()
             
             # 记录统计信息
-            blocked_count = len(context.data.get("blocked_urls", []))
+            blocked_patterns_count = len(context.data.get("blocked_url_patterns", []))
             slow_count = sum(context.data.get("slow_requests", {}).values())
             failed_count = sum(context.data.get("failed_requests", {}).values())
             
             logger.info(
                 f"请求监控完成: {context.url.url}, "
-                f"屏蔽URL: {blocked_count}, 慢请求: {slow_count}, 失败请求: {failed_count}"
+                f"屏蔽URL模式: {blocked_patterns_count}, 慢请求: {slow_count}, 失败请求: {failed_count}"
             )
             
         except Exception as e:
@@ -1397,9 +1472,15 @@ class ContentFinder(PageProcessor):
                     f"内容查找完成: {url_str}, 清理了 {self._siblings_removed} 个兄弟节点，"
                     f"遍历了 {level} 层元素"
                 )
+                # 标记核心内容已处理
+                if hasattr(context, 'data') and context.data is not None:
+                    context.data["core_content_processed"] = True
                 self._set_state(ProcessorState.COMPLETED)
             else:
                 logger.info(f"内容查找完成: {url_str}, 没有需要清理的兄弟节点")
+                # 即使没有清理兄弟节点，也认为核心内容已处理
+                if hasattr(context, 'data') and context.data is not None:
+                    context.data["core_content_processed"] = True
                 self._set_state(ProcessorState.COMPLETED)
                 
         except Exception as e:
@@ -1431,5 +1512,131 @@ class ContentFinder(PageProcessor):
         # 清理临时数据
         self._siblings_removed = 0
         self._processing_start_time = None
+        
+        self._set_state(ProcessorState.FINISHED)
+
+
+class PdfExporter(PageProcessor):
+    """
+    PDF导出处理器
+    
+    将页面导出为 PDF, 接受一个目标路径, 优先级 40
+    detect: 上下文中添加已处理核心内容的标记时启动
+    run: 将当前页面作为 PDF 输出到指定路径, 处理成功标记完成, 否则标记放弃
+    """
+
+    def __init__(self, output_path: str, priority: int = 40):
+        """
+        初始化PDF导出处理器
+        
+        Args:
+            output_path: PDF输出路径
+            priority: 处理器优先级，默认为40
+        """
+        name = f"pdf_exporter_{uuid.uuid4().hex[:8]}"
+        super().__init__(name, priority)
+        self.output_path = output_path
+        self._exported = False
+        
+        logger.info(f"PdfExporter初始化: 输出路径='{output_path}', 优先级={priority}")
+
+    async def detect(self, context: PageContext) -> ProcessorState:
+        """
+        检测是否应该启动PDF导出
+        
+        只有在上下文中有已处理核心内容标记时才启动
+        
+        Args:
+            context: 页面上下文
+            
+        Returns:
+            ProcessorState: 检测后的状态
+        """
+        if self._exported:
+            return ProcessorState.COMPLETED
+        
+        # 检查是否有核心内容已处理的标记
+        if context.data.get("core_content_processed", False):
+            logger.info(f"PdfExporter检测到核心内容已处理，准备导出PDF: {context.url.url}")
+            return ProcessorState.READY
+        
+        return ProcessorState.WAITING
+
+    async def run(self, context: PageContext) -> None:
+        """
+        执行PDF导出
+        
+        将当前页面作为 PDF 输出到指定路径
+        
+        Args:
+            context: 页面上下文
+        """
+        current_url = context.url
+        url_str = current_url.url if current_url else "unknown"
+        
+        page = context.page
+        if not page:
+            logger.error(f"PdfExporter: 页面对象不存在，无法导出 PDF: {url_str}")
+            pdf_exporter_failed_total.labels(reason="no_page_object").inc()
+            self._set_state(ProcessorState.CANCELLED)
+            return
+        
+        start_time = time.time()
+        try:
+            logger.info(f"开始PDF导出: {url_str} -> {self.output_path}")
+            
+            await page.pdf(
+                path=self.output_path,
+                format="A4",
+                print_background=True,
+                margin={
+                    "top": "1cm",
+                    "right": "1cm",
+                    "bottom": "1cm",
+                    "left": "1cm",
+                },
+            )
+            
+            # 更新上下文数据
+            context.data["pdf_exported"] = True
+            context.data["pdf_path"] = self.output_path
+            self._exported = True
+            
+            # 记录成功指标
+            processing_time = time.time() - start_time
+            pdf_exporter_processing_time.observe(processing_time)
+            pdf_exporter_success_total.labels(format="A4").inc()
+            
+            logger.info(f"PdfExporter: PDF 导出成功 -> {self.output_path}")
+            self._set_state(ProcessorState.COMPLETED)
+            
+        except Exception as e:
+            # 记录失败指标
+            processing_time = time.time() - start_time
+            pdf_exporter_processing_time.observe(processing_time)
+            pdf_exporter_failed_total.labels(reason="pdf_generation_error").inc()
+            
+            logger.error(f"PdfExporter: PDF 导出失败: {url_str}, 错误: {e}")
+            self._set_state(ProcessorState.CANCELLED)
+
+    async def finish(self, context: PageContext) -> None:
+        """
+        完成PDF导出处理
+        
+        Args:
+            context: 页面上下文
+        """
+        current_url = context.url
+        url_str = current_url.url if current_url else "unknown"
+        
+        if self.state == ProcessorState.COMPLETED:
+            logger.info(f"PdfExporter: 完成导出 {url_str} -> {self.output_path}")
+        elif self.state == ProcessorState.CANCELLED:
+            logger.warning(f"PdfExporter: 导出取消 {url_str}")
+        else:
+            logger.info(f"PdfExporter处理器状态: {self.state.value}")
+        
+        # 清理临时数据
+        self._exported = False
         
         self._set_state(ProcessorState.FINISHED)

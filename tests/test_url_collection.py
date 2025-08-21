@@ -180,46 +180,6 @@ class TestSimpleCollection:
         # 移除不存在的URL
         assert collection.remove_url("nonexistent") is False
     
-    def test_block_url(self, collection):
-        """测试屏蔽URL"""
-        url = "https://example.com"
-        url_id = collection.add_url(url)
-        
-        # 通过ID屏蔽
-        assert collection.block_url(url_id) is True
-        url_obj = collection.get_by_id(url_id)
-        assert url_obj.status == URLStatus.BLOCKED
-        
-        # 重新添加另一个URL，通过URL地址屏蔽
-        url2 = "https://github.com"
-        collection.add_url(url2)
-        assert collection.block_url(url2) is True
-        
-        url_obj2 = collection.get_by_url(url2)
-        assert url_obj2.status == URLStatus.BLOCKED
-        
-        # 屏蔽不存在的URL
-        assert collection.block_url("nonexistent") is False
-    
-    def test_unblock_url(self, collection):
-        """测试解除屏蔽URL"""
-        url = "https://example.com"
-        url_id = collection.add_url(url)
-        
-        # 先屏蔽
-        collection.block_url(url_id)
-        assert collection.get_by_id(url_id).status == URLStatus.BLOCKED
-        
-        # 解除屏蔽
-        assert collection.unblock_url(url_id) is True
-        assert collection.get_by_id(url_id).status == URLStatus.PENDING
-        
-        # 对非BLOCKED状态的URL解除屏蔽应该失败
-        assert collection.unblock_url(url_id) is False
-        
-        # 解除屏蔽不存在的URL
-        assert collection.unblock_url("nonexistent") is False
-    
     def test_bulk_add_urls(self, collection):
         """测试批量添加URL"""
         urls = [
@@ -255,25 +215,13 @@ class TestSimpleCollection:
         stats = collection.get_all_statuses()
         assert all(count == 0 for count in stats.values())
     
-    def test_get_blocked_urls(self, collection):
-        """测试获取被屏蔽的URL"""
-        urls = ["https://example.com", "https://github.com"]
-        url_ids = collection.bulk_add_urls(urls)
-        
-        # 屏蔽一个URL
-        collection.block_url(url_ids[0])
-        
-        blocked_urls = collection.get_blocked_urls()
-        assert len(blocked_urls) == 1
-        assert blocked_urls[0].url == urls[0]
-    
     def test_get_pending_urls(self, collection):
         """测试获取待处理的URL"""
         urls = ["https://example.com", "https://github.com"]
         url_ids = collection.bulk_add_urls(urls)
         
-        # 屏蔽一个URL
-        collection.block_url(url_ids[0])
+        # 标记一个URL为已访问
+        collection.update_status(url_ids[0], URLStatus.VISITED)
         
         pending_urls = collection.get_pending_urls()
         assert len(pending_urls) == 1

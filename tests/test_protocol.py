@@ -182,7 +182,6 @@ class TestURLCollection:
         assert stats[URLStatus.PENDING] == 1
         assert stats[URLStatus.VISITED] == 1
         assert stats[URLStatus.FAILED] == 1
-        assert stats[URLStatus.BLOCKED] == 0
 
 
 class MockPageProcessor(PageProcessor):

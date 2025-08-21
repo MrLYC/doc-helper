@@ -403,8 +403,8 @@ class TestProcessors:
         
         # 验证初始化
         assert monitor._monitoring_started
-        assert "blocked_urls" in mock_page_context.data
-        assert isinstance(mock_page_context.data["blocked_urls"], list)
+        assert "blocked_url_patterns" in mock_page_context.data
+        assert isinstance(mock_page_context.data["blocked_url_patterns"], list)
     
     @pytest.mark.asyncio
     async def test_request_monitor_slow_request_blocking(self, mock_page_context, mock_url_collection):
@@ -426,13 +426,13 @@ class TestProcessors:
         # 运行监控
         await monitor.run(mock_page_context)
         
-        # 验证只有超过阈值的URL被屏蔽
-        blocked_urls = [item["url"] for item in mock_page_context.data.get("blocked_urls", [])]
-        assert "https://example.com/api/slow1" in blocked_urls
-        assert "https://example.com/api/slow2" not in blocked_urls
+        # 验证只有超过阈值的URL模式被屏蔽
+        blocked_patterns = [item["url_pattern"] for item in mock_page_context.data.get("blocked_url_patterns", [])]
+        assert "https://example.com/api/slow1" in blocked_patterns
+        assert "https://example.com/api/slow2" not in blocked_patterns
         
-        # 验证URL被添加到集合中
-        assert mock_url_collection.count_by_status(URLStatus.BLOCKED) == 1
+        # 验证屏蔽模式被添加到monitor
+        assert "https://example.com/api/slow1" in monitor.block_url_patterns
     
     @pytest.mark.asyncio
     async def test_request_monitor_failed_request_blocking(self, mock_page_context, mock_url_collection):
@@ -454,13 +454,13 @@ class TestProcessors:
         # 运行监控
         await monitor.run(mock_page_context)
         
-        # 验证只有超过阈值的URL被屏蔽
-        blocked_urls = [item["url"] for item in mock_page_context.data.get("blocked_urls", [])]
-        assert "https://example.com/api/failed1" in blocked_urls
-        assert "https://example.com/api/failed2" not in blocked_urls
+        # 验证只有超过阈值的URL模式被屏蔽
+        blocked_patterns = [item["url_pattern"] for item in mock_page_context.data.get("blocked_url_patterns", [])]
+        assert "https://example.com/api/failed1" in blocked_patterns
+        assert "https://example.com/api/failed2" not in blocked_patterns
         
-        # 验证URL被添加到集合中
-        assert mock_url_collection.count_by_status(URLStatus.BLOCKED) == 1
+        # 验证屏蔽模式被添加到monitor
+        assert "https://example.com/api/failed1" in monitor.block_url_patterns
     
     @pytest.mark.asyncio
     async def test_request_monitor_url_cleaning(self, mock_page_context, mock_url_collection):
@@ -489,20 +489,14 @@ class TestProcessors:
         # 屏蔽URL
         monitor._block_problematic_url(test_url, test_reason, mock_page_context)
         
-        # 验证URL被添加到集合
-        assert mock_url_collection.count_by_status(URLStatus.BLOCKED) == 1
-        
-        # 验证被屏蔽的URL信息
-        blocked_urls = mock_url_collection.get_by_status(URLStatus.BLOCKED)
-        assert len(blocked_urls) == 1
-        assert blocked_urls[0].url == test_url
-        assert blocked_urls[0].category == "blocked_by_request_monitor"
+        # 验证URL模式被添加到屏蔽列表
+        assert test_url in monitor.block_url_patterns
         
         # 验证上下文记录
-        assert "blocked_urls" in mock_page_context.data
-        blocked_items = mock_page_context.data["blocked_urls"]
+        assert "blocked_url_patterns" in mock_page_context.data
+        blocked_items = mock_page_context.data["blocked_url_patterns"]
         assert len(blocked_items) == 1
-        assert blocked_items[0]["url"] == test_url
+        assert blocked_items[0]["url_pattern"] == test_url
         assert blocked_items[0]["reason"] == test_reason
     
     @pytest.mark.asyncio
@@ -512,9 +506,9 @@ class TestProcessors:
         monitor._monitoring_started = True
         
         # Add test data
-        mock_page_context.data["blocked_urls"] = [
-            {"url": "https://example.com/test1", "reason": "slow request", "blocked_at": time.time()},
-            {"url": "https://example.com/test2", "reason": "failed request", "blocked_at": time.time()},
+        mock_page_context.data["blocked_url_patterns"] = [
+            {"url_pattern": "https://example.com/test1", "reason": "slow request", "blocked_at": time.time()},
+            {"url_pattern": "https://example.com/test2", "reason": "failed request", "blocked_at": time.time()},
         ]
         mock_page_context.data["slow_requests"] = defaultdict(int, {"url1": 5})
         mock_page_context.data["failed_requests"] = defaultdict(int, {"url2": 3})

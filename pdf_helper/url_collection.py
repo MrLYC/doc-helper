@@ -237,54 +237,6 @@ class SimpleCollection(URLCollection):
         
         return True
     
-    def block_url(self, url_or_id: str) -> bool:
-        """
-        屏蔽一个URL（设置为BLOCKED状态）
-        
-        Args:
-            url_or_id: URL地址或URL ID
-            
-        Returns:
-            bool: 屏蔽成功返回True，URL不存在返回False
-        """
-        # 尝试通过ID查找
-        url_obj = self.get_by_id(url_or_id)
-        if not url_obj:
-            # 尝试通过URL地址查找
-            url_obj = self.get_by_url(url_or_id)
-        
-        if not url_obj:
-            return False
-        
-        # 更新状态为BLOCKED
-        return self.update_status(url_obj.id, URLStatus.BLOCKED)
-    
-    def unblock_url(self, url_or_id: str) -> bool:
-        """
-        解除屏蔽一个URL（设置为PENDING状态）
-        
-        Args:
-            url_or_id: URL地址或URL ID
-            
-        Returns:
-            bool: 解除屏蔽成功返回True，URL不存在返回False
-        """
-        # 尝试通过ID查找
-        url_obj = self.get_by_id(url_or_id)
-        if not url_obj:
-            # 尝试通过URL地址查找
-            url_obj = self.get_by_url(url_or_id)
-        
-        if not url_obj:
-            return False
-        
-        # 只有BLOCKED状态的URL才能解除屏蔽
-        if url_obj.status != URLStatus.BLOCKED:
-            return False
-        
-        # 更新状态为PENDING
-        return self.update_status(url_obj.id, URLStatus.PENDING)
-    
     def clear_all(self) -> None:
         """清空所有URL"""
         self._urls_by_id.clear()
@@ -309,10 +261,6 @@ class SimpleCollection(URLCollection):
             url_id = self.add_url(url, category)
             url_ids.append(url_id)
         return url_ids
-    
-    def get_blocked_urls(self) -> List[URL]:
-        """获取所有被屏蔽的URL"""
-        return self.get_by_status(URLStatus.BLOCKED)
     
     def get_pending_urls(self) -> List[URL]:
         """获取所有待处理的URL"""
@@ -382,9 +330,6 @@ if __name__ == "__main__":
     
     url_ids = simple_collection.bulk_add_urls(urls)
     print(f"\n添加了 {len(url_ids)} 个URL")
-    
-    # 屏蔽一个URL
-    simple_collection.block_url("https://github.com")
     
     # 显示状态统计
     stats = simple_collection.get_all_statuses()

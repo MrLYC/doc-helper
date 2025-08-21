@@ -20,7 +20,6 @@ class URLStatus(Enum):
     """URL状态枚举"""
     PENDING = "pending"      # 待访问
     VISITED = "visited"      # 已访问
-    BLOCKED = "blocked"      # 已屏蔽
     FAILED = "failed"        # 已失败
 
 
