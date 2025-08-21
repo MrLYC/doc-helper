@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import PlainTextResponse, JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST
 
@@ -94,6 +94,8 @@ class ServerConfig:
         self.links_selector: str = "body a"
         self.clean_selector: str = "*[id*='ad'], *[class*='popup'], script[src*='analytics']"
         self.content_selector: str = "main, article, .content, #content"
+        self.url_pattern: Optional[str] = None
+        self.max_depth: int = 12
         
         # 请求监控配置
         self.slow_request_threshold: int = 100
@@ -124,16 +126,21 @@ def create_argument_parser() -> argparse.ArgumentParser:
         epilog="""
 示例用法:
   # 基本使用
-  python server.py -u https://example.com -o /output
+  python server.py -u https://example.com -o /output/docs.pdf
+
+  # 使用输出目录
+  python server.py -u https://example.com -O /output
 
   # 高级配置
   python server.py \\
     --urls https://site1.com https://site2.com \\
     --concurrent-tabs 5 \\
     --page-timeout 120 \\
-    --output-dir /output \\
+    -o /output/combined_docs.pdf \\
     --max-pages 1000 \\
     --max-file-size 50 \\
+    --url-pattern ".*\\/docs\\/.*" \\
+    --max-depth 3 \\
     --block-patterns ".*\\.gif" ".*analytics.*" \\
     --clean-selector "*[id*='ad'], .popup" \\
     --content-selector "main article" \\
@@ -142,9 +149,11 @@ def create_argument_parser() -> argparse.ArgumentParser:
   # 生产环境
   python server.py \\
     -u https://docs.example.com \\
-    -o /data/pdfs \\
+    -o /data/documentation.pdf \\
     -c 10 \\
     -t 180 \\
+    -p ".*\\/api\\/.*|.*\\/guide\\/.*" \\
+    --max-depth 5 \\
     --host 0.0.0.0 \\
     --port 8080
         """
@@ -160,10 +169,15 @@ def create_argument_parser() -> argparse.ArgumentParser:
     )
     
     parser.add_argument(
-        "-o", "--output-dir",
+        "-O", "--output-dir",
         dest="output_dir",
-        required=True,
-        help="PDF 输出目录（必需）"
+        help="PDF 输出目录"
+    )
+    
+    parser.add_argument(
+        "-o", "--output",
+        dest="output",
+        help="输出文件路径（自动设置输出目录和文件模板）"
     )
     
     # 页面处理配置
@@ -227,6 +241,19 @@ def create_argument_parser() -> argparse.ArgumentParser:
         help="内容查找的 CSS 选择器 (默认: 'main, article, .content, #content')"
     )
     
+    parser.add_argument(
+        "-p", "--url-pattern",
+        dest="url_pattern",
+        help="LinksFinder 可以选择的 URL 正则表达式模式"
+    )
+    
+    parser.add_argument(
+        "--max-depth",
+        type=int,
+        default=12,
+        help="LinksFinder 基于根目录的最大链接深度 (默认: 12)"
+    )
+    
     # 请求监控配置
     parser.add_argument(
         "--block-patterns",
@@ -256,12 +283,14 @@ def create_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-pages",
         type=int,
+        default=10000,
         help="每个输出 PDF 的最大页数限制"
     )
     
     parser.add_argument(
         "--max-file-size",
         type=float,
+        default=140,
         help="每个输出 PDF 的最大文件大小（MB）"
     )
     
@@ -333,20 +362,42 @@ def parse_config_from_args(args: argparse.Namespace) -> ServerConfig:
     config.links_selector = args.links_selector
     config.clean_selector = args.clean_selector
     config.content_selector = args.content_selector
+    config.url_pattern = args.url_pattern
+    config.max_depth = args.max_depth
     
     # 请求监控配置
     config.slow_request_threshold = args.slow_request_threshold
     config.failed_request_threshold = args.failed_request_threshold
     
-    # 输出配置
-    config.output_dir = args.output_dir
+    # 输出配置处理和验证
+    if hasattr(args, 'output') and args.output and hasattr(args, 'output_dir') and args.output_dir:
+        raise ValueError("不能同时指定 -o/--output 和 -O/--output-dir 参数")
+    
+    if hasattr(args, 'output') and args.output:
+        # 如果指定了 -o/--output，自动设置相关参数
+        output_path = Path(args.output)
+        config.output_dir = str(output_path.parent)
+        name = output_path.stem
+        ext = output_path.suffix if output_path.suffix else '.pdf'
+        
+        config.single_file_template = f"{name}{ext}"
+        config.multi_file_template = f"{name}-{{index}}{ext}"
+    elif hasattr(args, 'output_dir') and args.output_dir:
+        # 使用传统的参数
+        config.output_dir = args.output_dir
+        config.single_file_template = args.single_file_template
+        config.multi_file_template = args.multi_file_template
+    else:
+        # 默认输出配置
+        config.output_dir = "/tmp/pdf_output"
+        config.single_file_template = args.single_file_template
+        config.multi_file_template = args.multi_file_template
+    
     config.temp_dir = args.temp_dir
     
     # PDF 合并配置
     config.max_pages = args.max_pages
     config.max_file_size_mb = args.max_file_size
-    config.single_file_template = args.single_file_template
-    config.multi_file_template = args.multi_file_template
     config.overwrite_existing = args.overwrite
     
     # 服务器配置
@@ -393,7 +444,11 @@ def create_manager_from_config(config: ServerConfig) -> ChromiumManager:
         )
     
     # 添加链接发现
-    builder = builder.find_links(css_selector=config.links_selector)
+    builder = builder.find_links(
+        css_selector=config.links_selector,
+        url_pattern=config.url_pattern,
+        max_depth=config.max_depth
+    )
     
     # 添加元素清理
     if config.clean_selector:
@@ -605,6 +660,58 @@ async def stop_processing():
         pass
     
     return {"status": "stopped", "message": "页面处理已停止"}
+
+
+@app.get("/pages")
+async def get_active_pages():
+    """获取所有活跃页面的信息"""
+    global manager
+    
+    if not manager:
+        return {"status": "error", "message": "Manager 未初始化"}
+    
+    try:
+        pages_info = manager.get_active_pages_info()
+        return {
+            "status": "success", 
+            "total_pages": len(pages_info),
+            "pages": pages_info
+        }
+    except Exception as e:
+        logger.error(f"获取活跃页面信息失败: {e}")
+        return {"status": "error", "message": f"获取页面信息失败: {str(e)}"}
+
+
+@app.get("/snapshot/{slot}")
+async def get_page_snapshot(slot: int):
+    """获取指定槽位页面的截图"""
+    global manager
+    
+    if not manager:
+        raise HTTPException(status_code=503, detail="Manager 未初始化")
+    
+    if slot < 0:
+        raise HTTPException(status_code=400, detail="槽位号不能为负数")
+    
+    try:
+        screenshot_bytes = await manager.get_page_screenshot(slot)
+        
+        if screenshot_bytes is None:
+            raise HTTPException(status_code=404, detail=f"槽位 {slot} 不存在或截图失败")
+        
+        return Response(
+            content=screenshot_bytes,
+            media_type="image/png",
+            headers={
+                "Content-Disposition": f"inline; filename=page_snapshot_slot_{slot}.png",
+                "Cache-Control": "no-cache, no-store, must-revalidate"
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取页面截图失败 (slot={slot}): {e}")
+        raise HTTPException(status_code=500, detail=f"获取截图失败: {str(e)}")
 
 
 async def main_processing_loop(config: ServerConfig):

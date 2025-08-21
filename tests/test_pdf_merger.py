@@ -256,7 +256,7 @@ class TestPdfMerger:
         """测试获取可用模板变量"""
         variables = self.merger.get_available_template_variables()
         
-        expected_keys = {'name', 'index', 'total', 'date', 'time', 'datetime', 'timestamp'}
+        expected_keys = {'name', 'index', 'total', 'date', 'time', 'datetime', 'timestamp', 'ext'}
         assert set(variables.keys()) == expected_keys
     
     @patch.object(PdfMerger, 'analyze_files')

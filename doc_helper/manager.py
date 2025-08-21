@@ -7,7 +7,7 @@
 import asyncio
 import logging
 import time
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 from prometheus_client import Counter, Histogram, Gauge, CollectorRegistry, generate_latest
@@ -117,6 +117,41 @@ class ChromiumManager(PageManager):
         self.active_pages_gauge.set(len(self._active_pages))
         
         return generate_latest(self.metrics_registry)
+    
+    def get_active_pages_info(self) -> List[Dict[str, Any]]:
+        """获取所有活跃页面的信息"""
+        pages_info = []
+        for i, (url_id, context) in enumerate(self._active_pages.items()):
+            pages_info.append({
+                "slot": i,
+                "url_id": url_id,
+                "url": context.url.url,
+                "title": context.url.title or "未知",
+                "start_time": context.start_time,
+                "processors": list(context.processors.keys())
+            })
+        return pages_info
+    
+    async def get_page_screenshot(self, slot: int) -> Optional[bytes]:
+        """获取指定槽位页面的截图"""
+        active_pages = list(self._active_pages.items())
+        
+        if slot < 0 or slot >= len(active_pages):
+            return None
+        
+        url_id, context = active_pages[slot]
+        
+        try:
+            # 获取页面截图
+            screenshot_bytes = await context.page.screenshot(
+                type="png",
+                full_page=True,
+                timeout=5000  # 5秒超时
+            )
+            return screenshot_bytes
+        except Exception as e:
+            logger.error(f"获取页面截图失败 (slot={slot}, url_id={url_id}): {e}")
+            return None
     
     def _update_url_status_metrics(self) -> None:
         """更新URL状态指标"""

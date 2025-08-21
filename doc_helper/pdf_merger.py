@@ -248,7 +248,8 @@ class PdfMerger:
             'date': now.strftime('%Y%m%d'),
             'time': now.strftime('%H%M%S'),
             'datetime': now.strftime('%Y%m%d_%H%M%S'),
-            'timestamp': int(now.timestamp())
+            'timestamp': int(now.timestamp()),
+            'ext': '.pdf'
         }
         
         # 选择模板
@@ -459,7 +460,8 @@ class PdfMerger:
             'date': '日期 (YYYYMMDD)',
             'time': '时间 (HHMMSS)',
             'datetime': '日期时间 (YYYYMMDD_HHMMSS)',
-            'timestamp': 'Unix时间戳'
+            'timestamp': 'Unix时间戳',
+            'ext': '文件扩展名（默认 .pdf）'
         }
     
     def estimate_output_info(self, file_paths: List[str]) -> Dict[str, Any]:

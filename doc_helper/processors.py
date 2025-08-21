@@ -5,9 +5,11 @@
 """
 
 import logging
+import re
 import time
 import uuid
 from collections import defaultdict
+from typing import List, Optional
 from urllib.parse import urlparse
 
 from playwright.async_api import Request, Response
@@ -604,6 +606,8 @@ class LinksFinder(PageProcessor):
         url_collection: URLCollection,
         css_selector: str = "body",
         priority: int = 10,
+        url_pattern: Optional[str] = None,
+        max_depth: int = 12,
     ):
         """
         初始化链接发现处理器
@@ -613,14 +617,29 @@ class LinksFinder(PageProcessor):
             url_collection: URL集合，用于添加发现的链接
             css_selector: CSS选择器，指定要搜索链接的容器
             priority: 优先级，固定为10
+            url_pattern: URL匹配的正则表达式模式
+            max_depth: 基于根目录的最大链接深度
 
         """
         super().__init__(name, priority)
         self.url_collection = url_collection
         self.css_selector = css_selector
+        self.url_pattern = url_pattern
+        self.max_depth = max_depth
         self._ready_executed = False
         self._completed_executed = False
         self._start_time = None
+        
+        # 编译正则表达式模式
+        self._url_regex = None
+        if url_pattern:
+            try:
+                import re
+                self._url_regex = re.compile(url_pattern)
+                logger.info(f"LinksFinder URL模式已设置: {url_pattern}")
+            except re.error as e:
+                logger.error(f"URL模式正则表达式无效: {url_pattern}, 错误: {e}")
+                self._url_regex = None
 
     def _get_domain_path(self, url: str) -> tuple[str, str]:
         """获取URL的域名和路径"""
@@ -647,6 +666,75 @@ class LinksFinder(PageProcessor):
             return bool(parsed.netloc)
         except Exception:
             return False
+
+    def _matches_url_pattern(self, url: str) -> bool:
+        """检查URL是否匹配设定的模式"""
+        if not self._url_regex:
+            return True  # 如果没有设置模式，则匹配所有URL
+        
+        try:
+            return bool(self._url_regex.search(url))
+        except Exception as e:
+            logger.warning(f"URL模式匹配错误: {e}")
+            return True  # 出错时默认匹配
+
+    def _calculate_url_depth(self, url: str, base_urls: List[str]) -> int:
+        """
+        计算URL相对于基础URL的深度
+        
+        Args:
+            url: 要计算深度的URL
+            base_urls: 基础URL列表（入口URLs）
+            
+        Returns:
+            URL深度，如果无法计算则返回999
+        """
+        try:
+            from urllib.parse import urlparse
+            
+            parsed_url = urlparse(url)
+            url_path = parsed_url.path.rstrip('/')
+            
+            min_depth = 999
+            
+            for base_url in base_urls:
+                parsed_base = urlparse(base_url)
+                
+                # 检查是否是同一域名
+                if parsed_url.netloc != parsed_base.netloc:
+                    continue
+                
+                base_path = parsed_base.path.rstrip('/')
+                
+                # 如果URL路径不是基础路径的子路径，跳过
+                if not url_path.startswith(base_path):
+                    continue
+                
+                # 计算深度
+                relative_path = url_path[len(base_path):].lstrip('/')
+                if not relative_path:
+                    depth = 0
+                else:
+                    depth = len([p for p in relative_path.split('/') if p])
+                
+                min_depth = min(min_depth, depth)
+            
+            return min_depth if min_depth != 999 else 0
+            
+        except Exception as e:
+            logger.warning(f"计算URL深度失败: {e}")
+            return 0
+
+    def _get_entry_urls(self) -> List[str]:
+        """获取入口URL列表"""
+        try:
+            # 从URL集合中获取category为"entry"的URLs
+            all_urls = self.url_collection.get_all_urls()
+            entry_urls = [url.url for url in all_urls if url.category == "entry"]
+            return entry_urls
+        except Exception as e:
+            logger.warning(f"获取入口URL失败: {e}")
+            return []
 
     def _generate_url_id(self, url: str) -> str:
         """生成URL的唯一ID"""
@@ -715,9 +803,24 @@ class LinksFinder(PageProcessor):
     async def _add_links_to_collection(self, links: list[str], context: PageContext) -> int:
         """将链接添加到URL集合中"""
         added_count = 0
+        filtered_count = 0
+        entry_urls = self._get_entry_urls()
         
         for link in links:
             try:
+                # 应用URL模式过滤
+                if not self._matches_url_pattern(link):
+                    filtered_count += 1
+                    logger.debug(f"URL不匹配模式，跳过: {link}")
+                    continue
+                
+                # 应用深度过滤
+                depth = self._calculate_url_depth(link, entry_urls)
+                if depth > self.max_depth:
+                    filtered_count += 1
+                    logger.debug(f"URL深度({depth})超过限制({self.max_depth})，跳过: {link}")
+                    continue
+                
                 # 生成唯一ID
                 url_id = self._generate_url_id(link)
                 
@@ -733,12 +836,15 @@ class LinksFinder(PageProcessor):
                 added = self.url_collection.add(url_obj)
                 if added:
                     added_count += 1
-                    logger.debug(f"添加新链接: {link}")
+                    logger.debug(f"添加新链接 (深度: {depth}): {link}")
                 else:
                     logger.debug(f"链接已存在: {link}")
                     
             except Exception as e:
                 logger.error(f"添加链接失败 {link}: {e}")
+        
+        if filtered_count > 0:
+            logger.info(f"过滤了 {filtered_count} 个链接（模式/深度限制）")
         
         # 记录到上下文
         if "discovered_links" not in context.data:

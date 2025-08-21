@@ -270,7 +270,9 @@ class PageProcessingBuilder:
     def find_links(
         self,
         css_selector: str = "body a",
-        priority: int = 10
+        priority: int = 10,
+        url_pattern: Optional[str] = None,
+        max_depth: int = 12
     ) -> 'PageProcessingBuilder':
         """
         添加链接发现处理器
@@ -278,6 +280,8 @@ class PageProcessingBuilder:
         Args:
             css_selector: CSS选择器，指定要搜索链接的容器
             priority: 处理器优先级
+            url_pattern: URL匹配的正则表达式模式
+            max_depth: 基于根目录的最大链接深度
             
         Returns:
             PageProcessingBuilder: 构建器实例，支持链式调用
@@ -290,11 +294,14 @@ class PageProcessingBuilder:
             name=f"links_finder_{len(self._processors)}",
             url_collection=self._url_collection,
             css_selector=css_selector,
-            priority=priority
+            priority=priority,
+            url_pattern=url_pattern,
+            max_depth=max_depth
         )
         
         self._processors.append(links_finder)
-        logger.info(f"添加LinksFinder，CSS选择器: {css_selector}")
+        pattern_info = f", URL模式: {url_pattern}" if url_pattern else ""
+        logger.info(f"添加LinksFinder，CSS选择器: {css_selector}, 最大深度: {max_depth}{pattern_info}")
         return self
     
     def clean_elements(
