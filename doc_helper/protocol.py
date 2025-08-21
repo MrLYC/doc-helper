@@ -18,9 +18,11 @@ from playwright.async_api import Page, BrowserContext
 
 class URLStatus(Enum):
     """URL状态枚举"""
-    PENDING = "pending"      # 待访问
-    VISITED = "visited"      # 已访问
-    FAILED = "failed"        # 已失败
+    PENDING = "pending"        # 待访问
+    PROCESSING = "processing"  # 处理中
+    COMPLETED = "completed"    # 已完成
+    VISITED = "visited"        # 已访问 (为向后兼容保留)
+    FAILED = "failed"          # 已失败
 
 
 class ProcessorState(Enum):

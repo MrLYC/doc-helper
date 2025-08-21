@@ -108,9 +108,12 @@ simple_collection = create_simple_collection(category="bookmarks")
 系统支持以下 URL 状态：
 
 - `URLStatus.PENDING` - 待处理
-- `URLStatus.VISITED` - 已访问
-- `URLStatus.BLOCKED` - 已屏蔽
+- `URLStatus.PROCESSING` - 处理中
+- `URLStatus.COMPLETED` - 已完成
+- `URLStatus.VISITED` - 已访问 (为向后兼容保留)
 - `URLStatus.FAILED` - 处理失败
+
+URL 状态的典型流程：`PENDING` → `PROCESSING` → `COMPLETED`/`FAILED`
 
 ## 示例：文档处理流程
 

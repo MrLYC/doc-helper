@@ -678,6 +678,8 @@ async def health_check(_: None = Depends(verify_auth_token)):
         url_collection = manager.url_collection
         status["url_stats"] = {
             "pending": len(url_collection.get_by_status(URLStatus.PENDING)),
+            "processing": len(url_collection.get_by_status(URLStatus.PROCESSING)),
+            "completed": len(url_collection.get_by_status(URLStatus.COMPLETED)),
             "visited": len(url_collection.get_by_status(URLStatus.VISITED)),
             "failed": len(url_collection.get_by_status(URLStatus.FAILED)),
             "total": len(url_collection.get_all_urls())
@@ -729,6 +731,8 @@ async def get_status(_: None = Depends(verify_auth_token)):
         status["urls"] = {
             "total": len(all_urls),
             "pending": len(url_collection.get_by_status(URLStatus.PENDING)),
+            "processing": len(url_collection.get_by_status(URLStatus.PROCESSING)),
+            "completed": len(url_collection.get_by_status(URLStatus.COMPLETED)),
             "visited": len(url_collection.get_by_status(URLStatus.VISITED)),
             "failed": len(url_collection.get_by_status(URLStatus.FAILED))
         }
@@ -799,6 +803,8 @@ async def get_debug_info(_: None = Depends(verify_auth_token)):
                 url_collection = manager.url_collection
                 debug_info["url_stats"] = {
                     "pending": len(url_collection.get_by_status(URLStatus.PENDING)),
+                    "processing": len(url_collection.get_by_status(URLStatus.PROCESSING)),
+                    "completed": len(url_collection.get_by_status(URLStatus.COMPLETED)),
                     "visited": len(url_collection.get_by_status(URLStatus.VISITED)),
                     "failed": len(url_collection.get_by_status(URLStatus.FAILED)),
                     "total": len(url_collection.get_all_urls())

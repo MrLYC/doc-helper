@@ -255,15 +255,17 @@ class ChromiumManager(PageManager):
                                 
                                 # 检查是否所有URL都已处理完成
                                 total_urls = len(self.url_collection.get_all_urls())
+                                completed_urls = len(self.url_collection.get_by_status(URLStatus.COMPLETED))
                                 visited_urls = len(self.url_collection.get_by_status(URLStatus.VISITED))
                                 failed_urls = len(self.url_collection.get_by_status(URLStatus.FAILED))
-                                processed_urls = visited_urls + failed_urls
+                                successful_urls = completed_urls + visited_urls  # 兼容旧的VISITED状态
+                                processed_urls = successful_urls + failed_urls
                                 
-                                logger.info(f"URL处理状态 - 总计: {total_urls}, 已访问: {visited_urls}, 已失败: {failed_urls}, 待处理: {pending_count}")
+                                logger.info(f"URL处理状态 - 总计: {total_urls}, 已完成: {completed_urls}, 已访问(旧): {visited_urls}, 已失败: {failed_urls}, 待处理: {pending_count}")
                                 
                                 # 如果所有URL都已处理完成，退出主循环
                                 if pending_count == 0 and processed_urls == total_urls:
-                                    logger.info(f"所有URL都已处理完成，总计: {total_urls}, 成功: {visited_urls}, 失败: {failed_urls}")
+                                    logger.info(f"所有URL都已处理完成，总计: {total_urls}, 成功: {successful_urls}, 失败: {failed_urls}")
                                     break
                                 
                                 # 如果还有pending URL但没有活跃页面，尝试重试逻辑
@@ -308,18 +310,22 @@ class ChromiumManager(PageManager):
                     
                     # 添加最终的处理统计
                     final_total = len(self.url_collection.get_all_urls())
+                    final_completed = len(self.url_collection.get_by_status(URLStatus.COMPLETED))
                     final_visited = len(self.url_collection.get_by_status(URLStatus.VISITED))
                     final_failed = len(self.url_collection.get_by_status(URLStatus.FAILED))
                     final_pending = len(self.url_collection.get_by_status(URLStatus.PENDING))
+                    final_successful = final_completed + final_visited  # 兼容旧的VISITED状态
                     
                     logger.info("="*50)
                     logger.info("页面处理任务完成统计:")
                     logger.info(f"  总 URL 数量: {final_total}")
-                    logger.info(f"  成功处理: {final_visited}")
+                    logger.info(f"  已完成: {final_completed}")
+                    logger.info(f"  已访问(旧): {final_visited}")
+                    logger.info(f"  成功处理总计: {final_successful}")
                     logger.info(f"  处理失败: {final_failed}")
                     logger.info(f"  未处理: {final_pending}")
                     if final_total > 0:
-                        success_rate = (final_visited / final_total) * 100
+                        success_rate = (final_successful / final_total) * 100
                         logger.info(f"  成功率: {success_rate:.1f}%")
                     logger.info("="*50)
                     
@@ -472,6 +478,10 @@ class ChromiumManager(PageManager):
                 # 创建页面上下文
                 context = PageContext(page=page, url=url)
                 context.start_time = start_time  # 记录开始时间
+                
+                # 标记URL状态为处理中
+                self.url_collection.update_status(url.id, URLStatus.PROCESSING)
+                logger.info(f"URL状态已更新为处理中: {url.url}")
                 
                 # 创建页面处理器
                 logger.info(f"开始创建处理器 for {url.url}")
@@ -691,7 +701,7 @@ class ChromiumManager(PageManager):
                 logger.debug(f"记录页面大小指标失败: {e}")
             
             logger.info(f"页面处理完成: {context.url.url} (耗时: {total_duration:.2f}s)")
-            self.url_collection.update_status(url_id, URLStatus.VISITED)
+            self.url_collection.update_status(url_id, URLStatus.COMPLETED)
             await self._close_page(url_id)
             return
         

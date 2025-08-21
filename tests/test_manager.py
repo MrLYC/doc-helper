@@ -241,9 +241,9 @@ class TestChromiumManager:
             # 验证每个页面都有2个处理器（来自processor_factories fixture）
             assert len(context.processors) == 2
             
-        # 验证URL状态没有被改变（应该仍然是PENDING，直到页面加载完成）
-        assert url_collection.has_status("0", URLStatus.PENDING) or url_collection.has_status("0", URLStatus.VISITED)
-        assert url_collection.has_status("1", URLStatus.PENDING) or url_collection.has_status("1", URLStatus.VISITED)
+        # 验证URL状态已更新为PROCESSING（页面加载完成后）
+        assert url_collection.has_status("0", URLStatus.PROCESSING) or url_collection.has_status("0", URLStatus.PENDING)
+        assert url_collection.has_status("1", URLStatus.PROCESSING) or url_collection.has_status("1", URLStatus.PENDING)
     
     @pytest.mark.asyncio
     async def test_process_single_page_success(self, manager):
@@ -300,8 +300,8 @@ class TestChromiumManager:
         current_time = time.time()
         await manager._process_single_page(context, current_time)
         
-        # 验证URL被标记为已访问
-        assert manager.url_collection.has_status("1", URLStatus.VISITED)
+        # 验证URL被标记为已完成
+        assert manager.url_collection.has_status("1", URLStatus.COMPLETED)
         # 验证页面被关闭
         manager._close_page.assert_called_once_with("1")
     
