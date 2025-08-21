@@ -23,6 +23,13 @@ from .processors import (
     ContentFinder
 )
 
+from .builder import (
+    PageProcessingBuilder,
+    create_web_scraper,
+    create_pdf_generator,
+    create_link_crawler
+)
+
 __version__ = "1.0.0"
 
 __all__ = [
@@ -42,6 +49,11 @@ __all__ = [
     "LinksFinder",
     "ElementCleaner",
     "ContentFinder",
+    # 构建器类
+    "PageProcessingBuilder",
+    "create_web_scraper", 
+    "create_pdf_generator",
+    "create_link_crawler",
     # 管理器类
     "ChromiumManager",
     "PageManagerConfig",
