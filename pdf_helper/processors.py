@@ -84,6 +84,11 @@ links_finder_processing_time = Histogram(
     buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0],
 )
 
+links_finder_active_finders = Gauge(
+    "links_finder_active_finders",
+    "当前活跃的链接发现处理器数量",
+)
+
 links_found_total = Counter(
     'links_found_total', 
     'Total number of links found',
@@ -95,6 +100,25 @@ elements_removed_total = Counter(
     'elements_removed_total',
     'Total number of elements removed',
     ['css_selector', 'success']
+)
+
+# ContentFinder 指标
+content_finder_siblings_removed = Counter(
+    'content_finder_siblings_removed_total',
+    'Total number of sibling elements removed by ContentFinder',
+    ['css_selector', 'level']
+)
+
+content_finder_processing_time = Histogram(
+    'content_finder_processing_seconds',
+    'ContentFinder processing time',
+    buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0]
+)
+
+content_finder_elements_found = Counter(
+    'content_finder_elements_found_total',
+    'Total number of content elements found',
+    ['css_selector', 'found']
 )
 
 
@@ -1194,5 +1218,218 @@ class ElementCleaner(PageProcessor):
         
         # 清理临时数据
         self._elements_removed = 0
+        
+        self._set_state(ProcessorState.FINISHED)
+
+
+class ContentFinder(PageProcessor):
+    """内容查找处理器，保留核心内容并清理其他兄弟节点"""
+
+    def __init__(self, css_selector: str, target_states: list[str] = None, priority: int = 30):
+        """
+        初始化内容查找处理器
+
+        Args:
+            css_selector: 用于查找核心内容的CSS选择器
+            target_states: 目标页面状态列表，默认为 ['ready', 'completed']
+            priority: 处理器优先级，默认为30
+        """
+        name = f"content_finder_{uuid.uuid4().hex[:8]}"
+        super().__init__(name, priority)
+        
+        self.css_selector = css_selector
+        self.target_states = target_states or ['ready', 'completed']
+        self._siblings_removed = 0
+        self._processing_start_time = None
+        
+        logger.info(
+            f"ContentFinder初始化: CSS选择器='{css_selector}', "
+            f"目标状态={self.target_states}, 优先级={priority}"
+        )
+        
+        # 记录指标
+        content_finder_elements_found.labels(
+            css_selector=css_selector,
+            found='initialized'
+        ).inc()
+
+    async def detect(self, context: PageContext) -> ProcessorState:
+        """
+        检测是否需要启动内容查找
+        
+        当页面状态符合目标状态且找到CSS选择器对应的元素时启动
+        
+        Args:
+            context: 页面上下文
+            
+        Returns:
+            ProcessorState: 检测后的状态
+        """
+        current_url = context.url
+        url_str = current_url.url if current_url else "unknown"
+        
+        # 检查页面状态
+        page_state = context.data.get("page_state", "loading")
+        if page_state not in self.target_states:
+            return ProcessorState.WAITING
+            
+        # 检查页面对象是否存在
+        if not context.page:
+            logger.warning(f"ContentFinder检测失败，页面对象不存在: {url_str}")
+            self._set_state(ProcessorState.CANCELLED)
+            return ProcessorState.CANCELLED
+            
+        try:
+            # 查找目标元素
+            element = await context.page.query_selector(self.css_selector)
+            if element is None:
+                logger.warning(
+                    f"ContentFinder未找到目标元素，放弃执行: {url_str}, "
+                    f"CSS选择器: {self.css_selector}"
+                )
+                self._set_state(ProcessorState.CANCELLED)
+                content_finder_elements_found.labels(
+                    css_selector=self.css_selector,
+                    found='not_found'
+                ).inc()
+                return ProcessorState.CANCELLED
+                
+            logger.info(
+                f"ContentFinder检测到目标元素，准备清理兄弟节点: {url_str}, "
+                f"CSS选择器: {self.css_selector}"
+            )
+            
+            content_finder_elements_found.labels(
+                css_selector=self.css_selector,
+                found='found'
+            ).inc()
+            
+            self._set_state(ProcessorState.READY)
+            return ProcessorState.READY
+            
+        except Exception as e:
+            logger.error(f"ContentFinder检测过程中发生错误: {url_str}, 错误: {e}")
+            self._set_state(ProcessorState.CANCELLED)
+            return ProcessorState.CANCELLED
+
+    async def run(self, context: PageContext) -> None:
+        """
+        执行内容查找和兄弟节点清理
+        
+        从目标元素开始向上遍历到body，删除所有兄弟节点
+        
+        Args:
+            context: 页面上下文
+        """
+        current_url = context.url
+        url_str = current_url.url if current_url else "unknown"
+        
+        if not context.page:
+            logger.error(f"ContentFinder执行失败，页面对象不存在: {url_str}")
+            self._set_state(ProcessorState.CANCELLED)
+            return
+            
+        self._processing_start_time = time.time()
+        
+        try:
+            logger.info(f"开始内容查找和清理: {url_str}")
+            
+            # 找到目标元素
+            target_element = await context.page.query_selector(self.css_selector)
+            if target_element is None:
+                logger.warning(f"未找到目标元素: {url_str}, CSS选择器: {self.css_selector}")
+                self._set_state(ProcessorState.CANCELLED)
+                return
+                
+            # 执行向上遍历和兄弟节点清理的JavaScript代码
+            siblings_removed = await context.page.evaluate("""
+                (selector) => {
+                    const targetElement = document.querySelector(selector);
+                    if (!targetElement) {
+                        return { totalRemoved: 0, level: 0 };
+                    }
+                    
+                    let totalRemoved = 0;
+                    let currentElement = targetElement;
+                    let level = 0;
+                    
+                    // 向上遍历直到body元素
+                    while (currentElement && currentElement.tagName.toLowerCase() !== 'body') {
+                        const parent = currentElement.parentElement;
+                        if (!parent) break;
+                        
+                        // 获取所有兄弟节点
+                        const siblings = Array.from(parent.children);
+                        
+                        // 删除除当前元素外的所有兄弟节点
+                        for (const sibling of siblings) {
+                            if (sibling !== currentElement) {
+                                sibling.remove();
+                                totalRemoved++;
+                            }
+                        }
+                        
+                        // 移动到父元素继续向上
+                        currentElement = parent;
+                        level++;
+                    }
+                    
+                    return { totalRemoved: totalRemoved, level: level };
+                }
+            """, self.css_selector)
+            
+            # 确保 siblings_removed 是一个字典
+            if not isinstance(siblings_removed, dict):
+                logger.warning(f"JavaScript 返回了意外的结果类型: {type(siblings_removed)}, 值: {siblings_removed}")
+                siblings_removed = {"totalRemoved": 0, "level": 0}
+            
+            self._siblings_removed = siblings_removed.get('totalRemoved', 0)
+            level = siblings_removed.get('level', 0)
+            
+            # 记录Prometheus指标
+            content_finder_siblings_removed.labels(
+                css_selector=self.css_selector,
+                level=str(level)
+            ).inc(self._siblings_removed)
+            
+            if self._siblings_removed > 0:
+                logger.info(
+                    f"内容查找完成: {url_str}, 清理了 {self._siblings_removed} 个兄弟节点，"
+                    f"遍历了 {level} 层元素"
+                )
+                self._set_state(ProcessorState.COMPLETED)
+            else:
+                logger.info(f"内容查找完成: {url_str}, 没有需要清理的兄弟节点")
+                self._set_state(ProcessorState.COMPLETED)
+                
+        except Exception as e:
+            logger.error(f"内容查找过程中发生错误: {url_str}, 错误: {e}")
+            self._set_state(ProcessorState.CANCELLED)
+        finally:
+            # 记录处理时间
+            if self._processing_start_time:
+                processing_time = time.time() - self._processing_start_time
+                content_finder_processing_time.observe(processing_time)
+
+    async def finish(self, context: PageContext) -> None:
+        """
+        完成内容查找处理
+        
+        Args:
+            context: 页面上下文
+        """
+        current_url = context.url
+        url_str = current_url.url if current_url else "unknown"
+        
+        if self.state == ProcessorState.COMPLETED:
+            logger.info(f"内容查找完成: {url_str}, 清理了 {self._siblings_removed} 个兄弟节点")
+        elif self.state == ProcessorState.CANCELLED:
+            logger.warning(f"内容查找取消: {url_str}")
+        else:
+            logger.info(f"内容查找处理器状态: {self.state.value}")
+        
+        # 清理临时数据
+        self._siblings_removed = 0
+        self._processing_start_time = None
         
         self._set_state(ProcessorState.FINISHED)

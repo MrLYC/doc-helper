@@ -19,7 +19,8 @@ from .processors import (
     PageMonitor,
     RequestMonitor,
     LinksFinder,
-    ElementCleaner
+    ElementCleaner,
+    ContentFinder
 )
 
 __version__ = "1.0.0"
@@ -40,6 +41,7 @@ __all__ = [
     "RequestMonitor",
     "LinksFinder",
     "ElementCleaner",
+    "ContentFinder",
     # 管理器类
     "ChromiumManager",
     "PageManagerConfig",
