@@ -63,7 +63,7 @@ poetry run site-to-pdf \
     --output-pdf "example-docs.pdf"
 
 # 或直接使用 Python
-poetry run python src/pdf_helper/site_to_pdf.py \
+poetry run python src/doc_helper/site_to_pdf.py \
     --base-url "https://example.com/docs/" \
     --content-selector "main.content" \
     --toc-selector "nav a" \
@@ -184,7 +184,7 @@ poetry run mypy src/
 ```
 doc-helper/
 ├── src/
-│   └── pdf_helper/
+│   └── doc_helper/
 │       ├── __init__.py
 │       └── site_to_pdf.py    # 主程序
 ├── tests/                    # 测试文件

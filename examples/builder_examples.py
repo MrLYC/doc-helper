@@ -10,7 +10,7 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from pdf_helper import (
+from doc_helper import (
     PageProcessingBuilder, 
     create_web_scraper,
     create_pdf_generator, 
@@ -97,7 +97,7 @@ async def example_custom_processors():
     """自定义处理器示例"""
     print("\n=== 自定义处理器示例 ===")
     
-    from pdf_helper.processors import ElementCleaner
+    from doc_helper.processors import ElementCleaner
     
     # 创建自定义处理器
     custom_cleaner = ElementCleaner(

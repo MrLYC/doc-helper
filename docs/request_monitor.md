@@ -58,7 +58,7 @@ request_monitor_active_monitors
 ### 基本用法
 
 ```python
-from pdf_helper import RequestMonitor, URLCollection
+from doc_helper import RequestMonitor, URLCollection
 
 # 创建URL集合（必须传递给RequestMonitor）
 url_collection = URLCollection()

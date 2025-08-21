@@ -32,7 +32,7 @@
 ### 基本用法
 
 ```python
-from pdf_helper import LinksFinder, URLCollection
+from doc_helper import LinksFinder, URLCollection
 
 # 创建URL集合
 url_collection = URLCollection()
@@ -129,7 +129,7 @@ def create_processors():
 ### 在管理器中使用
 
 ```python
-from pdf_helper import ChromiumManager, PageManagerConfig
+from doc_helper import ChromiumManager, PageManagerConfig
 
 # 配置管理器
 config = PageManagerConfig(
@@ -325,7 +325,7 @@ A: 使用更具体的CSS选择器，避免选择过大的DOM区域。
 1. **启用详细日志**
    ```python
    import logging
-   logging.getLogger('pdf_helper.processors').setLevel(logging.DEBUG)
+   logging.getLogger('doc_helper.processors').setLevel(logging.DEBUG)
    ```
 
 2. **检查页面状态**

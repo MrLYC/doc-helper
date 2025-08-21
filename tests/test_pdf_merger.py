@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
 
-from pdf_helper.pdf_merger import (
+from doc_helper.pdf_merger import (
     PdfMerger, MergeConfig, PdfInfo, MergeResult, create_merger
 )
 
@@ -55,7 +55,7 @@ class TestMergeConfig:
 class TestPdfInfo:
     """测试PdfInfo类"""
     
-    @patch('pdf_helper.pdf_merger.PdfReader')
+    @patch('doc_helper.pdf_merger.PdfReader')
     @patch('os.path.getsize')
     def test_from_file(self, mock_getsize, mock_pdf_reader):
         """测试从文件创建PdfInfo"""
@@ -77,7 +77,7 @@ class TestPdfInfo:
         assert info.title == "Test PDF"
         assert info.author == "Test Author"
     
-    @patch('pdf_helper.pdf_merger.PdfReader')
+    @patch('doc_helper.pdf_merger.PdfReader')
     @patch('os.path.getsize')
     def test_from_file_no_metadata(self, mock_getsize, mock_pdf_reader):
         """测试无元数据的PDF文件"""
@@ -122,7 +122,7 @@ class TestPdfMerger:
         with pytest.raises(ValueError, match="文件名模板不能为空"):
             PdfMerger(MergeConfig(single_file_template=""))
     
-    @patch('pdf_helper.pdf_merger.PdfInfo.from_file')
+    @patch('doc_helper.pdf_merger.PdfInfo.from_file')
     @patch('os.path.exists')
     def test_analyze_files(self, mock_exists, mock_from_file):
         """测试文件分析"""
@@ -228,8 +228,8 @@ class TestPdfMerger:
         # 临时启用覆盖
         self.merger.config.overwrite_existing = True
         
-        with patch('pdf_helper.pdf_merger.PdfReader') as mock_pdf_reader, \
-             patch('pdf_helper.pdf_merger.PdfWriter') as mock_pdf_writer, \
+        with patch('doc_helper.pdf_merger.PdfReader') as mock_pdf_reader, \
+             patch('doc_helper.pdf_merger.PdfWriter') as mock_pdf_writer, \
              patch('builtins.open'), \
              patch('os.path.exists', return_value=True):
             
@@ -351,8 +351,8 @@ class TestPdfMergerIntegration:
         )
         merger.config.overwrite_existing = True
         
-        with patch('pdf_helper.pdf_merger.PdfReader') as mock_pdf_reader, \
-             patch('pdf_helper.pdf_merger.PdfWriter') as mock_pdf_writer, \
+        with patch('doc_helper.pdf_merger.PdfReader') as mock_pdf_reader, \
+             patch('doc_helper.pdf_merger.PdfWriter') as mock_pdf_writer, \
              patch('builtins.open'), \
              patch('os.path.getsize', return_value=1024*1024):
             

@@ -52,7 +52,7 @@
 ### 基础用法
 
 ```python
-from pdf_helper.builder import PageProcessingBuilder
+from doc_helper.builder import PageProcessingBuilder
 
 # 简单的网页爬虫
 manager = (PageProcessingBuilder()
@@ -89,7 +89,7 @@ manager = (PageProcessingBuilder()
 ### 工厂函数用法
 
 ```python
-from pdf_helper.builder import create_pdf_generator
+from doc_helper.builder import create_pdf_generator
 
 # 使用工厂函数
 manager = (create_pdf_generator()
@@ -110,7 +110,7 @@ manager = (create_pdf_generator()
 ## 文件结构
 
 ```
-pdf_helper/
+doc_helper/
 ├── builder.py              # 主要 Builder 实现
 ├── __init__.py             # 导出 Builder 类和工厂函数
 └── ...

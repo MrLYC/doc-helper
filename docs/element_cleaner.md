@@ -31,7 +31,7 @@
 ### 基本用法
 
 ```python
-from pdf_helper import ElementCleaner
+from doc_helper import ElementCleaner
 
 # 创建基本的元素清理器
 cleaner = ElementCleaner(
@@ -168,7 +168,7 @@ def create_processors():
 ### 在管理器中使用
 
 ```python
-from pdf_helper import ChromiumManager, PageManagerConfig
+from doc_helper import ChromiumManager, PageManagerConfig
 
 # 配置管理器
 config = PageManagerConfig(
@@ -324,7 +324,7 @@ elements_removed_total{css_selector=".popup", success="false"}
 2. **启用详细日志**
    ```python
    import logging
-   logging.getLogger('pdf_helper.processors').setLevel(logging.DEBUG)
+   logging.getLogger('doc_helper.processors').setLevel(logging.DEBUG)
    ```
 
 3. **检查元素权限**

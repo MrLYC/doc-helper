@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from pdf_helper.protocol import (
+from doc_helper.protocol import (
     URL, URLCollection, URLStatus, ProcessorState, PageContext, PageProcessor
 )
 

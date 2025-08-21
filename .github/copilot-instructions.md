@@ -35,14 +35,14 @@ Doc Helper 是一个基于 Python 的网页文档转PDF爬虫工具。项目使�
 
 ### 项目结构
 ```
-src/pdf_helper/          # 主要源码包
+src/doc_helper/          # 主要源码包
 tests/                   # 测试文件
 docs/                    # 项目文档
 .github/                 # GitHub 配置文件
 ```
 
 ### 命令执行规范
-- 运行主程序: `poetry run site-to-pdf` 或 `poetry run python src/pdf_helper/site_to_pdf.py`
+- 运行主程序: `poetry run site-to-pdf` 或 `poetry run python src/doc_helper/site_to_pdf.py`
 - 代码格式化: `poetry run ruff format src/`
 - 代码检查: `poetry run ruff check src/ --fix`
 - 类型检查: `poetry run mypy src/`

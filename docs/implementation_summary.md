@@ -24,7 +24,7 @@
 ## 文件结构
 
 ```
-pdf_helper/
+doc_helper/
 ├── url_collection.py          # 主要实现文件 (340+ 行)
 │   ├── FileCollection         # 文件目录扫描器
 │   ├── SimpleCollection       # 简单 URL 管理器

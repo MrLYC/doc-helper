@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, Mock, patch, MagicMock
 
 import pytest
 
-from pdf_helper.manager import ChromiumManager
-from pdf_helper.protocol import (
+from doc_helper.manager import ChromiumManager
+from doc_helper.protocol import (
     URL, URLCollection, URLStatus, ProcessorState, PageManagerConfig
 )
 
@@ -255,7 +255,7 @@ class TestChromiumManager:
         # 创建一直等待的处理器
         waiting_processor = MockPageProcessor("waiting", [ProcessorState.WAITING])
         
-        from pdf_helper.protocol import PageContext
+        from doc_helper.protocol import PageContext
         context = PageContext(page=mock_page, url=url)
         context.start_time = time.time() - 2.0  # 2秒前开始，超过1秒超时
         context.add_processor(waiting_processor)
@@ -279,7 +279,7 @@ class TestChromiumManager:
         # 创建已完成的处理器
         finished_processor = MockPageProcessor("finished", [ProcessorState.FINISHED])
         
-        from pdf_helper.protocol import PageContext
+        from doc_helper.protocol import PageContext
         context = PageContext(page=mock_page, url=url)
         context.add_processor(finished_processor)
         
@@ -306,7 +306,7 @@ class TestChromiumManager:
         processor = MockPageProcessor("test")
         processor._set_state(ProcessorState.COMPLETED)
         
-        from pdf_helper.protocol import PageContext
+        from doc_helper.protocol import PageContext
         context = PageContext(page=mock_page, url=url)
         context.add_processor(processor)
         
@@ -326,7 +326,7 @@ class TestChromiumManager:
         mock_page = AsyncMock()
         url = URL(id="1", url="https://example.com")
         
-        from pdf_helper.protocol import PageContext
+        from doc_helper.protocol import PageContext
         context = PageContext(page=mock_page, url=url)
         
         manager._active_pages["1"] = context
@@ -394,7 +394,7 @@ class TestChromiumManager:
         # 添加活跃页面
         mock_page = AsyncMock()
         url = URL(id="1", url="https://example.com")
-        from pdf_helper.protocol import PageContext
+        from doc_helper.protocol import PageContext
         context = PageContext(page=mock_page, url=url)
         manager._active_pages["1"] = context
         
@@ -424,7 +424,7 @@ class TestChromiumManager:
         mock_page = AsyncMock()
         mock_page.close.side_effect = Exception("Page close error")
         url = URL(id="1", url="https://example.com")
-        from pdf_helper.protocol import PageContext
+        from doc_helper.protocol import PageContext
         context = PageContext(page=mock_page, url=url)
         manager._active_pages["1"] = context
         
@@ -437,7 +437,7 @@ class TestChromiumManager:
         mock_browser.close.assert_called_once()
     
     @pytest.mark.asyncio
-    @patch('pdf_helper.manager.async_playwright')
+    @patch('doc_helper.manager.async_playwright')
     async def test_full_run_workflow(self, mock_playwright, manager, url_collection):
         """测试完整运行流程"""
         # 模拟playwright上下文管理器

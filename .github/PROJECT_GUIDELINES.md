@@ -164,7 +164,7 @@ tests/
 #### 开发命令
 ```bash
 # 运行主程序
-poetry run python src/pdf_helper/site_to_pdf.py [args...]
+poetry run python src/doc_helper/site_to_pdf.py [args...]
 
 # 或使用安装的脚本命令
 poetry run site-to-pdf [args...]
@@ -212,7 +212,7 @@ doc-helper/
 │   ├── ISSUE_TEMPLATE/     # Issue 模板
 │   └── PROJECT_GUIDELINES.md  # 本规范文档
 ├── src/
-│   └── pdf_helper/         # 主要源码包
+│   └── doc_helper/         # 主要源码包
 │       ├── __init__.py     # 包初始化
 │       └── site_to_pdf.py  # 主程序
 ├── tests/                  # 测试文件

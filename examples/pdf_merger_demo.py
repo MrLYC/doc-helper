@@ -13,7 +13,7 @@ from pathlib import Path
 # 添加项目路径
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from pdf_helper import (
+from doc_helper import (
     PdfMerger, MergeConfig, create_merger
 )
 

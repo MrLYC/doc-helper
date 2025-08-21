@@ -22,7 +22,7 @@ ContentFinder 是一个页面内容查找和清理处理器，专门用于保留
 ### 基本用法
 
 ```python
-from pdf_helper import ContentFinder, ChromiumManager, PageMonitor
+from doc_helper import ContentFinder, ChromiumManager, PageMonitor
 
 # 创建内容查找器
 content_finder = ContentFinder(
@@ -282,7 +282,7 @@ ContentFinder 未执行
 #### 1. 启用详细日志
 ```python
 import logging
-logging.getLogger('pdf_helper.processors').setLevel(logging.DEBUG)
+logging.getLogger('doc_helper.processors').setLevel(logging.DEBUG)
 ```
 
 #### 2. 测试选择器

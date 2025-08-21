@@ -1,6 +1,6 @@
 # URL 集合使用指南
 
-本文档介绍如何使用 `pdf_helper.url_collection` 模块中的 `FileCollection` 和 `SimpleCollection`。
+本文档介绍如何使用 `doc_helper.url_collection` 模块中的 `FileCollection` 和 `SimpleCollection`。
 
 ## FileCollection - 文件目录扫描器
 
@@ -9,7 +9,7 @@
 ### 基本用法
 
 ```python
-from pdf_helper.url_collection import FileCollection
+from doc_helper.url_collection import FileCollection
 from pathlib import Path
 
 # 创建文件集合，扫描特定扩展名的文件
@@ -44,7 +44,7 @@ for url_obj in pending_files:
 ### 基本用法
 
 ```python
-from pdf_helper.url_collection import SimpleCollection
+from doc_helper.url_collection import SimpleCollection
 
 # 创建简单集合
 collection = SimpleCollection(category="web_urls")
@@ -80,7 +80,7 @@ collection.remove_url("https://stackoverflow.com")
 模块提供了两个便利函数用于快速创建集合：
 
 ```python
-from pdf_helper.url_collection import create_file_collection, create_simple_collection
+from doc_helper.url_collection import create_file_collection, create_simple_collection
 from pathlib import Path
 
 # 快速创建文件集合
@@ -115,8 +115,8 @@ simple_collection = create_simple_collection(category="bookmarks")
 ## 示例：文档处理流程
 
 ```python
-from pdf_helper.url_collection import FileCollection
-from pdf_helper.protocol import URLStatus
+from doc_helper.url_collection import FileCollection
+from doc_helper.protocol import URLStatus
 from pathlib import Path
 
 # 1. 扫描文档目录

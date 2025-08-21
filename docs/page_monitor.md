@@ -60,7 +60,7 @@ page_monitor_active_pages
 ### 基本用法
 
 ```python
-from pdf_helper import PageMonitor, PageContext, URL
+from doc_helper import PageMonitor, PageContext, URL
 
 # 创建页面监控器
 monitor = PageMonitor(

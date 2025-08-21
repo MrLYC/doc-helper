@@ -5,8 +5,8 @@ ElementCleaner 处理器的单元测试
 import pytest
 from unittest.mock import AsyncMock, Mock
 
-from pdf_helper.processors import ElementCleaner
-from pdf_helper.protocol import URL, URLCollection, URLStatus, PageContext, ProcessorState
+from doc_helper.processors import ElementCleaner
+from doc_helper.protocol import URL, URLCollection, URLStatus, PageContext, ProcessorState
 
 
 class TestElementCleaner:

@@ -22,7 +22,7 @@ def run_server_example():
     print("示例 1: 基本使用")
     print("命令:")
     cmd1 = [
-        "python", "-m", "pdf_helper.server",
+        "python", "-m", "doc_helper.server",
         "--url", "https://example.com",
         "--output-dir", output_dir,
         "--concurrent-tabs", "2",
@@ -35,7 +35,7 @@ def run_server_example():
     print("示例 2: 高级配置")
     print("命令:")
     cmd2 = [
-        "python", "-m", "pdf_helper.server",
+        "python", "-m", "doc_helper.server",
         "--urls", "https://docs.python.org", "https://fastapi.tiangolo.com",
         "--output-dir", output_dir,
         "--concurrent-tabs", "5",
@@ -54,7 +54,7 @@ def run_server_example():
     print("示例 3: 生产环境配置")
     print("命令:")
     cmd3 = [
-        "python", "-m", "pdf_helper.server",
+        "python", "-m", "doc_helper.server",
         "--url", "https://docs.example.com",
         "--output-dir", "/data/pdfs",
         "--concurrent-tabs", "10",
@@ -90,7 +90,7 @@ def run_server_example():
     if choice == 'y':
         print("\n正在运行测试...")
         test_cmd = [
-            "python", "-m", "pdf_helper.server",
+            "python", "-m", "doc_helper.server",
             "--url", "https://httpbin.org/html",
             "--output-dir", output_dir,
             "--concurrent-tabs", "1",

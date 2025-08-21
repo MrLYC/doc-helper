@@ -8,8 +8,8 @@ import re
 from unittest.mock import AsyncMock, Mock
 from collections import defaultdict
 
-from pdf_helper.processors import RequestMonitor
-from pdf_helper.protocol import URL, URLCollection, URLStatus, PageContext, ProcessorState
+from doc_helper.processors import RequestMonitor
+from doc_helper.protocol import URL, URLCollection, URLStatus, PageContext, ProcessorState
 
 
 class TestRequestMonitor:

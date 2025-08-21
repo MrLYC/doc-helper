@@ -9,8 +9,8 @@ from unittest.mock import patch
 
 import pytest
 
-from pdf_helper.url_collection import FileCollection, SimpleCollection
-from pdf_helper.protocol import URLStatus
+from doc_helper.url_collection import FileCollection, SimpleCollection
+from doc_helper.protocol import URLStatus
 
 
 class TestFileCollection:
@@ -244,7 +244,7 @@ class TestConvenienceFunctions:
         # 创建测试文件
         (tmp_path / "test.txt").write_text("test")
         
-        from pdf_helper.url_collection import create_file_collection
+        from doc_helper.url_collection import create_file_collection
         
         collection = create_file_collection(
             directory=tmp_path,
@@ -256,7 +256,7 @@ class TestConvenienceFunctions:
     
     def test_create_simple_collection(self):
         """测试创建简单集合的便利函数"""
-        from pdf_helper.url_collection import create_simple_collection
+        from doc_helper.url_collection import create_simple_collection
         
         collection = create_simple_collection()
         

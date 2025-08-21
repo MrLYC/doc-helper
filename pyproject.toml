@@ -23,7 +23,7 @@ omit = [
 name = "doc-helper"
 version = "0.1.0"
 description = ""
-package-mode = false
+package-mode = true
 
 authors = ["MrLYC <github@m.mrlyc.com>"]
 maintainers = ["MrLYC <github@m.mrlyc.com>"]

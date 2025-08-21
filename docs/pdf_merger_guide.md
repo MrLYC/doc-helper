@@ -34,7 +34,7 @@ PDF合并器是一个功能强大的工具，用于将多个PDF文件合并为�
 ### Python API
 
 ```python
-from pdf_helper import PdfMerger, MergeConfig, create_merger
+from doc_helper import PdfMerger, MergeConfig, create_merger
 
 # 方式1: 使用配置类
 config = MergeConfig(
@@ -72,22 +72,22 @@ else:
 
 ```bash
 # 基础合并
-python pdf_helper/pdf_merger.py *.pdf -o /output -n merged
+python doc_helper/pdf_merger.py *.pdf -o /output -n merged
 
 # 页数限制
-python pdf_helper/pdf_merger.py *.pdf --max-pages 100 -o /output -n report
+python doc_helper/pdf_merger.py *.pdf --max-pages 100 -o /output -n report
 
 # 文件大小限制
-python pdf_helper/pdf_merger.py *.pdf --max-size 25 -o /output -n docs
+python doc_helper/pdf_merger.py *.pdf --max-size 25 -o /output -n docs
 
 # 自定义模板
-python pdf_helper/pdf_merger.py *.pdf \
+python doc_helper/pdf_merger.py *.pdf \
     --single-template "Report_{name}_{date}.pdf" \
     --multi-template "Report_{name}_Vol{index:02d}_{date}.pdf" \
     -o /output -n annual_report
 
 # 详细输出
-python pdf_helper/pdf_merger.py *.pdf -v -o /output -n combined
+python doc_helper/pdf_merger.py *.pdf -v -o /output -n combined
 ```
 
 ## 配置选项
@@ -187,10 +187,10 @@ if not result.success:
 
 ## 安装
 
-PDF合并器已集成到 pdf_helper 包中：
+PDF合并器已集成到 doc_helper 包中：
 
 ```python
-from pdf_helper import PdfMerger, MergeConfig, create_merger
+from doc_helper import PdfMerger, MergeConfig, create_merger
 ```
 
 ## 性能优化建议

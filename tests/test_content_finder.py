@@ -7,8 +7,8 @@ ContentFinder处理器测试
 import pytest
 from unittest.mock import AsyncMock, Mock, patch
 
-from pdf_helper.protocol import PageContext, ProcessorState, URL, URLStatus
-from pdf_helper.processors import ContentFinder
+from doc_helper.protocol import PageContext, ProcessorState, URL, URLStatus
+from doc_helper.processors import ContentFinder
 
 
 class TestContentFinder:

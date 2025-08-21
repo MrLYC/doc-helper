@@ -5,15 +5,15 @@ Builder模块的单元测试
 import pytest
 from unittest.mock import Mock, AsyncMock
 
-from pdf_helper.builder import (
+from doc_helper.builder import (
     PageProcessingBuilder, 
     create_web_scraper, 
     create_pdf_generator,
     create_link_crawler
 )
-from pdf_helper.manager import ChromiumManager
-from pdf_helper.url_collection import SimpleCollection
-from pdf_helper.processors import (
+from doc_helper.manager import ChromiumManager
+from doc_helper.url_collection import SimpleCollection
+from doc_helper.processors import (
     PageMonitor, RequestMonitor, LinksFinder, 
     ElementCleaner, ContentFinder, PDFExporter
 )
@@ -252,7 +252,7 @@ class TestPageProcessingBuilder:
         assert builder._url_collection is not None
         
         # 验证URL已添加到集合
-        from pdf_helper.protocol import URLStatus
+        from doc_helper.protocol import URLStatus
         urls = builder._url_collection.get_by_status(URLStatus.PENDING)
         assert len(urls) >= 1
         assert any(url.url == "https://example.com" for url in urls)
