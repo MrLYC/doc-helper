@@ -13,7 +13,7 @@ from .protocol import (
 from .manager import ChromiumManager
 
 from .processors import (
-    PageLoadProcessor, ContentExtractProcessor, 
+    PageMonitor, PageLoadProcessor, ContentExtractProcessor, 
     PDFGenerateProcessor, LinkExtractProcessor, ScreenshotProcessor
 )
 
@@ -29,6 +29,6 @@ __all__ = [
     "ChromiumManager",
     
     # 处理器实现
-    "PageLoadProcessor", "ContentExtractProcessor",
+    "PageMonitor", "PageLoadProcessor", "ContentExtractProcessor",
     "PDFGenerateProcessor", "LinkExtractProcessor", "ScreenshotProcessor",
 ]

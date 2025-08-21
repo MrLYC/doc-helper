@@ -4,9 +4,10 @@
 
 import pytest
 from unittest.mock import AsyncMock, Mock
+from collections import defaultdict
 
 from pdf_helper.processors import (
-    PageLoadProcessor, ContentExtractProcessor, PDFGenerateProcessor
+    PageLoadProcessor, ContentExtractProcessor, PDFGenerateProcessor, PageMonitor
 )
 from pdf_helper.protocol import URL, PageContext, ProcessorState
 
@@ -23,10 +24,30 @@ class TestProcessors:
         mock_page.pdf = AsyncMock(return_value=b"fake pdf content")
         mock_page.evaluate.return_value = "complete"  # document.readyState
         mock_page.query_selector.return_value = True  # 元素存在
+        mock_page.close = AsyncMock()
+        mock_page.wait_for_load_state = AsyncMock()
+        mock_page.on = Mock()  # 事件监听器
         
         url = URL(id="1", url="https://example.com")
         context = PageContext(page=mock_page, url=url)
         return context
+    
+    @pytest.fixture
+    def mock_request(self):
+        """创建模拟请求对象"""
+        mock_request = Mock()
+        mock_request.url = "https://example.com/api/data"
+        mock_request.failure = None
+        return mock_request
+    
+    @pytest.fixture
+    def mock_response(self):
+        """创建模拟响应对象"""
+        mock_response = Mock()
+        mock_response.status = 200
+        mock_response.request = Mock()
+        mock_response.request.url = "https://example.com/api/data"
+        return mock_response
     
     @pytest.mark.asyncio
     async def test_page_load_processor(self, mock_page_context):
@@ -129,6 +150,170 @@ class TestProcessors:
         assert "title" in mock_page_context.data
         assert "content" in mock_page_context.data
         assert "pdf_generated" in mock_page_context.data
+    
+    @pytest.mark.asyncio
+    async def test_page_monitor_initialization(self, mock_page_context):
+        """测试页面监控处理器初始化"""
+        monitor = PageMonitor("monitor", page_timeout=30.0)
+        
+        # 测试初始状态
+        assert monitor.priority == 0  # 固定优先级
+        assert monitor.page_timeout == 30.0
+        assert monitor.slow_request_timeout == 3.0  # 1/10的页面超时
+        assert monitor._page_state == "loading"
+        assert not monitor._monitoring_started
+    
+    @pytest.mark.asyncio
+    async def test_page_monitor_detect(self, mock_page_context):
+        """测试页面监控检测逻辑"""
+        monitor = PageMonitor("monitor")
+        
+        # 初始状态应该就绪
+        state = await monitor.detect(mock_page_context)
+        assert state == ProcessorState.READY
+        
+        # 开始监控后应该运行
+        monitor._monitoring_started = True
+        state = await monitor.detect(mock_page_context)
+        assert state == ProcessorState.RUNNING
+        
+        # 完成后应该完成
+        monitor._page_state = "completed"
+        state = await monitor.detect(mock_page_context)
+        assert state == ProcessorState.COMPLETED
+    
+    @pytest.mark.asyncio
+    async def test_page_monitor_run_initialization(self, mock_page_context):
+        """测试页面监控运行初始化"""
+        monitor = PageMonitor("monitor", page_timeout=20.0)
+        
+        # 模拟页面还在加载中
+        mock_page_context.page.evaluate.return_value = "loading"
+        mock_page_context.page.wait_for_load_state.side_effect = Exception("Network not idle")
+        
+        # 运行监控
+        await monitor.run(mock_page_context)
+        
+        # 验证初始化
+        assert monitor._monitoring_started
+        assert mock_page_context.data["page_state"] == "loading"
+        assert "slow_requests" in mock_page_context.data
+        assert "failed_requests" in mock_page_context.data
+        
+        # 验证页面监听器设置
+        mock_page_context.page.on.assert_called()
+    
+    @pytest.mark.asyncio
+    async def test_page_monitor_state_transitions(self, mock_page_context):
+        """测试页面状态转换"""
+        monitor = PageMonitor("monitor")
+        
+        # 模拟页面还在加载中
+        mock_page_context.page.evaluate.return_value = "loading"
+        mock_page_context.page.wait_for_load_state.side_effect = Exception("Network not idle")
+        
+        # 初始化监控
+        await monitor.run(mock_page_context)
+        assert monitor._page_state == "loading"
+        
+        # 模拟页面ready状态
+        mock_page_context.page.evaluate.return_value = "complete"
+        await monitor.run(mock_page_context)
+        assert monitor._page_state == "ready"
+        
+        # 模拟网络空闲
+        mock_page_context.page.wait_for_load_state.side_effect = None
+        mock_page_context.page.wait_for_load_state.return_value = None
+        await monitor.run(mock_page_context)
+        
+        # 验证状态转换
+        assert monitor._page_state == "completed"
+        assert mock_page_context.data["page_state"] == "completed"
+    
+    @pytest.mark.asyncio
+    async def test_page_monitor_slow_request_detection(self, mock_page_context, mock_request, mock_response):
+        """测试慢请求检测"""
+        monitor = PageMonitor("monitor", page_timeout=10.0)  # 慢请求超时为1秒
+        monitor._context = mock_page_context
+        
+        # 模拟请求开始
+        await monitor._on_request(mock_request)
+        assert mock_request.url in monitor._request_start_times
+        
+        # 模拟慢响应（手动设置较早的开始时间）
+        import time
+        monitor._request_start_times[mock_request.url] = time.time() - 2.0  # 2秒前
+        
+        await monitor._on_response(mock_response)
+        
+        # 验证慢请求记录
+        expected_url = "https://example.com/api/data"
+        assert expected_url in mock_page_context.data["slow_requests"]
+        assert mock_page_context.data["slow_requests"][expected_url] == 1
+    
+    @pytest.mark.asyncio
+    async def test_page_monitor_failed_request_detection(self, mock_page_context, mock_request):
+        """测试失败请求检测"""
+        monitor = PageMonitor("monitor")
+        monitor._context = mock_page_context
+        
+        # 设置请求失败原因
+        mock_request.failure = "net::ERR_CONNECTION_REFUSED"
+        
+        await monitor._on_request_failed(mock_request)
+        
+        # 验证失败请求记录
+        expected_url = "https://example.com/api/data"
+        assert expected_url in mock_page_context.data["failed_requests"]
+        assert mock_page_context.data["failed_requests"][expected_url] == 1
+    
+    @pytest.mark.asyncio
+    async def test_page_monitor_url_cleaning(self, mock_page_context):
+        """测试URL清理（移除查询字符串）"""
+        monitor = PageMonitor("monitor")
+        
+        # 测试URL清理
+        original_url = "https://example.com/api/data?param1=value1&param2=value2"
+        cleaned_url = monitor._remove_query_string(original_url)
+        expected_url = "https://example.com/api/data"
+        assert cleaned_url == expected_url
+        
+        # 测试域名和路径提取
+        domain, path = monitor._get_domain_path(original_url)
+        assert domain == "example.com"
+        assert path == "/api/data"
+    
+    @pytest.mark.asyncio
+    async def test_page_monitor_finish(self, mock_page_context):
+        """测试页面监控清理"""
+        monitor = PageMonitor("monitor")
+        monitor._context = mock_page_context
+        
+        # 添加一些请求时间记录
+        monitor._request_start_times["test_url"] = 123456.0
+        
+        # 添加统计数据
+        mock_page_context.data["slow_requests"] = defaultdict(int, {"url1": 2})
+        mock_page_context.data["failed_requests"] = defaultdict(int, {"url2": 1})
+        
+        await monitor.finish(mock_page_context)
+        
+        # 验证清理
+        mock_page_context.page.close.assert_called_once()
+        assert len(monitor._request_start_times) == 0
+        assert monitor.state == ProcessorState.FINISHED
+    
+    @pytest.mark.asyncio
+    async def test_page_monitor_network_idle_timeout(self, mock_page_context):
+        """测试网络空闲超时"""
+        monitor = PageMonitor("monitor")
+        
+        # 模拟网络空闲超时
+        from playwright.async_api import TimeoutError
+        mock_page_context.page.wait_for_load_state.side_effect = TimeoutError("Timeout")
+        
+        result = await monitor._wait_for_network_idle(mock_page_context.page, timeout=1.0)
+        assert result is False
 
 
 if __name__ == "__main__":
