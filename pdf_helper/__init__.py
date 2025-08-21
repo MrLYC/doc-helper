@@ -30,6 +30,14 @@ from .builder import (
     create_link_crawler
 )
 
+from .pdf_merger import (
+    PdfMerger,
+    MergeConfig,
+    PdfInfo,
+    MergeResult,
+    create_merger
+)
+
 __version__ = "1.0.0"
 
 __all__ = [
@@ -54,6 +62,12 @@ __all__ = [
     "create_web_scraper", 
     "create_pdf_generator",
     "create_link_crawler",
+    # PDF合并器类
+    "PdfMerger",
+    "MergeConfig",
+    "PdfInfo", 
+    "MergeResult",
+    "create_merger",
     # 管理器类
     "ChromiumManager",
     "PageManagerConfig",
