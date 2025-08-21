@@ -11,6 +11,7 @@ from pdf_helper.builder import (
     create_pdf_generator,
     create_link_crawler
 )
+from pdf_helper.manager import ChromiumManager
 from pdf_helper.url_collection import SimpleCollection
 from pdf_helper.processors import (
     PageMonitor, RequestMonitor, LinksFinder, 
@@ -75,15 +76,54 @@ class TestPageProcessingBuilder:
         assert builder._page_timeout == 30.0
     
     def test_set_verbose(self):
-        """测试设置详细日志模式"""
+        """测试设置可视化模式"""
         builder = PageProcessingBuilder()
         
+        # 测试设置为True
         result = builder.set_verbose(True)
-        assert result is builder
+        assert result is builder  # 测试链式调用
         assert builder._verbose is True
         
+        # 测试设置为False
         builder.set_verbose(False)
         assert builder._verbose is False
+    
+    def test_set_headless(self):
+        """测试设置无头模式"""
+        builder = PageProcessingBuilder()
+        
+        # 测试设置为True
+        result = builder.set_headless(True)
+        assert result is builder  # 测试链式调用
+        assert builder._headless is True
+        
+        # 测试设置为False
+        builder.set_headless(False)
+        assert builder._headless is False
+    
+    def test_set_poll_interval(self):
+        """测试设置轮询间隔"""
+        builder = PageProcessingBuilder()
+        result = builder.set_poll_interval(2.0)
+        assert result is builder  # 测试链式调用
+        assert builder._poll_interval == 2.0
+    
+    def test_set_detect_timeout(self):
+        """测试设置检测超时时间"""
+        builder = PageProcessingBuilder()
+        result = builder.set_detect_timeout(10.0)
+        assert result is builder  # 测试链式调用
+        assert builder._detect_timeout == 10.0
+    
+    def test_set_retry_callback(self):
+        """测试设置重试回调函数"""
+        def mock_callback(url, error):
+            return True
+        
+        builder = PageProcessingBuilder()
+        result = builder.set_retry_callback(mock_callback)
+        assert result is builder  # 测试链式调用
+        assert builder._retry_callback is mock_callback
     
     def test_set_url_collection(self):
         """测试设置URL集合"""
@@ -234,6 +274,40 @@ class TestPageProcessingBuilder:
         assert builder._request_monitor is not None
         assert builder._content_finder is not None
         assert len(builder._processors) == 3  # LinksFinder, ElementCleaner, PDFExporter
+    
+    def test_build_with_all_config(self):
+        """测试构建包含完整配置的管理器"""
+        def mock_callback(url, error):
+            return False
+        
+        builder = (PageProcessingBuilder()
+            .set_entry_url("https://example.com")
+            .set_concurrent_tabs(2)
+            .set_page_timeout(120.0)
+            .set_poll_interval(2.0)
+            .set_detect_timeout(10.0)
+            .set_headless(False)
+            .set_verbose(True)
+            .set_retry_callback(mock_callback)
+            .find_links("a")
+            .export_pdf("/tmp/test.pdf"))
+        
+        manager = builder.build()
+        
+        # 验证管理器创建成功
+        assert manager is not None
+        assert isinstance(manager, ChromiumManager)
+        
+        # 验证配置正确传递
+        config = manager.config
+        assert config.max_concurrent_tabs == 2
+        assert config.page_timeout == 120.0
+        assert config.poll_interval == 2.0
+        assert config.detect_timeout == 10.0
+        assert config.headless is False
+        
+        # 验证其他参数
+        assert manager.verbose is True
 
 
 class TestBuilderFactories:

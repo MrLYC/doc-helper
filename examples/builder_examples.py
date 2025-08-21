@@ -6,14 +6,16 @@ Builder模式使用示例
 
 import asyncio
 import logging
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
 from pdf_helper import (
     PageProcessingBuilder, 
-    create_web_scraper, 
-    create_pdf_generator,
+    create_web_scraper,
+    create_pdf_generator, 
     create_link_crawler
-)
-
-# 配置日志
+)# 配置日志
 logging.basicConfig(level=logging.INFO)
 
 
@@ -147,5 +149,53 @@ async def main():
     print("注意：这些示例只展示了构建过程，实际执行需要调用 manager.run()")
 
 
+def example_6_full_configuration():
+    """示例6：完整配置的构建器"""
+    print("=== 示例6：完整配置的构建器 ===")
+    
+    def custom_retry_callback(url: str, error: Exception) -> bool:
+        """自定义重试回调"""
+        print(f"重试决策 - URL: {url}, 错误: {error}")
+        return True  # 总是重试
+    
+    try:
+        manager = (PageProcessingBuilder()
+            .set_entry_url("https://httpbin.org/html")
+            .set_concurrent_tabs(2)
+            .set_page_timeout(120.0)
+            .set_poll_interval(0.5)
+            .set_detect_timeout(15.0)
+            .set_headless(True)
+            .set_verbose(False)
+            .set_retry_callback(custom_retry_callback)
+            .block_url_patterns([".*\\.gif", ".*analytics.*"])
+            .find_links("body a")
+            .clean_elements("script, style")
+            .find_content("body")
+            .export_pdf("/tmp/full_config_output.pdf")
+            .build())
+        
+        print("✅ 完整配置构建器创建成功")
+        print(f"并发标签页: {manager.config.max_concurrent_tabs}")
+        print(f"页面超时: {manager.config.page_timeout}秒")
+        print(f"轮询间隔: {manager.config.poll_interval}秒")
+        print(f"检测超时: {manager.config.detect_timeout}秒")
+        print(f"无头模式: {manager.config.headless}")
+        print(f"可视化模式: {manager.verbose}")
+        
+    except Exception as e:
+        print(f"❌ 完整配置构建器创建失败: {e}")
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    example_1_basic_web_scraper()
+    print()
+    example_2_pdf_generator()
+    print()
+    example_3_link_crawler()
+    print()
+    example_4_advanced_processing()
+    print()
+    example_5_factory_functions()
+    print()
+    example_6_full_configuration()

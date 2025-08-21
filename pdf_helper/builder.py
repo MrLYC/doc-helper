@@ -10,7 +10,7 @@ from typing import List, Optional, Callable, Any
 from pathlib import Path
 
 from .manager import ChromiumManager, PageManagerConfig
-from .protocol import PageManager, URLCollection
+from .protocol import PageManager, URLCollection, RetryCallback
 from .url_collection import SimpleCollection
 from .processors import (
     PageMonitor, RequestMonitor, LinksFinder, ElementCleaner, 
@@ -50,11 +50,15 @@ class PageProcessingBuilder:
         self._entry_urls: List[str] = []
         self._concurrent_tabs: int = 1
         self._page_timeout: float = 60.0
+        self._poll_interval: float = 1.0
+        self._detect_timeout: float = 5.0
+        self._headless: bool = True
         self._processors: List[Any] = []
         self._request_monitor: Optional[RequestMonitor] = None
         self._content_finder: Optional[ContentFinder] = None
         self._config: Optional[PageManagerConfig] = None
         self._verbose: bool = False
+        self._retry_callback: Optional[RetryCallback] = None
         
         logger.info("PageProcessingBuilder 初始化完成")
     
@@ -130,16 +134,72 @@ class PageProcessingBuilder:
     
     def set_verbose(self, verbose: bool = True) -> 'PageProcessingBuilder':
         """
-        设置详细日志模式
+        设置可视化模式
         
         Args:
-            verbose: 是否启用详细日志
+            verbose: 是否启用可视化模式（显示浏览器界面）
             
         Returns:
-            PageProcessingBuilder: 构建器实例，支持链式调用
+            PageProcessingBuilder: 当前构建器实例
         """
         self._verbose = verbose
-        logger.info(f"设置详细日志模式: {verbose}")
+        logger.info(f"设置可视化模式: {verbose}")
+        return self
+    
+    def set_headless(self, headless: bool = True) -> 'PageProcessingBuilder':
+        """
+        设置无头模式
+        
+        Args:
+            headless: 是否使用无头模式
+            
+        Returns:
+            PageProcessingBuilder: 当前构建器实例
+        """
+        self._headless = headless
+        logger.info(f"设置无头模式: {headless}")
+        return self
+    
+    def set_poll_interval(self, interval: float) -> 'PageProcessingBuilder':
+        """
+        设置轮询间隔
+        
+        Args:
+            interval: 轮询间隔（秒）
+            
+        Returns:
+            PageProcessingBuilder: 当前构建器实例
+        """
+        self._poll_interval = interval
+        logger.info(f"设置轮询间隔: {interval}秒")
+        return self
+    
+    def set_detect_timeout(self, timeout: float) -> 'PageProcessingBuilder':
+        """
+        设置检测超时时间
+        
+        Args:
+            timeout: 检测超时时间（秒）
+            
+        Returns:
+            PageProcessingBuilder: 当前构建器实例
+        """
+        self._detect_timeout = timeout
+        logger.info(f"设置检测超时时间: {timeout}秒")
+        return self
+    
+    def set_retry_callback(self, callback: RetryCallback) -> 'PageProcessingBuilder':
+        """
+        设置重试回调函数
+        
+        Args:
+            callback: 重试回调函数
+            
+        Returns:
+            PageProcessingBuilder: 当前构建器实例
+        """
+        self._retry_callback = callback
+        logger.info("设置重试回调函数")
         return self
     
     def set_config(self, config: PageManagerConfig) -> 'PageProcessingBuilder':
@@ -346,7 +406,10 @@ class PageProcessingBuilder:
         if self._config is None:
             self._config = PageManagerConfig(
                 max_concurrent_tabs=self._concurrent_tabs,
-                page_timeout=self._page_timeout
+                page_timeout=self._page_timeout,
+                poll_interval=self._poll_interval,
+                detect_timeout=self._detect_timeout,
+                headless=self._headless
             )
         
         # 构建处理器工厂列表
@@ -379,6 +442,7 @@ class PageProcessingBuilder:
             url_collection=self._url_collection,
             processor_factories=processor_factories,
             config=self._config,
+            retry_callback=self._retry_callback,
             verbose=self._verbose
         )
         
