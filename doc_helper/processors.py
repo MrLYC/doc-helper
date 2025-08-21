@@ -319,6 +319,7 @@ class PageMonitor(PageProcessor):
             await self._setup_page_listeners(context.page)
 
             logger.info(f"开始监控页面: {context.url.url}")
+            return  # 初始化后先返回，让其他处理器有机会检测状态
 
         # 检查页面load状态
         try:
@@ -328,6 +329,7 @@ class PageMonitor(PageProcessor):
                 context.data["page_state"] = "ready"
                 page_monitor_state_changes.labels(state="ready").inc()
                 logger.info(f"页面进入load状态: {context.url.url}")
+                return  # 状态改变后返回，让其他处理器有机会运行
         except Exception as e:
             logger.warning(f"检查页面状态失败: {e}")
 
@@ -351,6 +353,7 @@ class PageMonitor(PageProcessor):
                     logger.info(f"页面监控完成，无更高优先级处理器运行: {context.url.url}")
                 else:
                     logger.debug(f"等待更高优先级处理器完成: {[p.name for p in running_processors]}")
+                return
 
         # 记录处理时间
         if self._start_time:
@@ -360,12 +363,10 @@ class PageMonitor(PageProcessor):
     async def finish(self, context: PageContext) -> None:
         """清理页面监控"""
         try:
-            # 移除页面事件监听器
-            if context.page:
-                # Playwright 的事件监听器在页面关闭时会自动清理
-                await context.page.close()
-                logger.info(f"页面已关闭: {context.url.url}")
-
+            # 移除页面事件监听器 - 不要关闭页面，让Manager来管理
+            # Playwright 的事件监听器会在页面关闭时自动清理
+            # 注意：页面由Manager统一管理，处理器不应该关闭页面
+            
             # 更新指标
             page_monitor_active_pages.dec()
 
@@ -376,9 +377,13 @@ class PageMonitor(PageProcessor):
             slow_count = sum(context.data.get("slow_requests", {}).values())
             failed_count = sum(context.data.get("failed_requests", {}).values())
 
-            logger.info(
-                f"页面监控完成: {context.url.url}, 慢请求: {slow_count}, 失败请求: {failed_count}",
-            )
+            # 只有在有慢请求或失败请求时才记录日志
+            if slow_count > 0 or failed_count > 0:
+                logger.info(
+                    f"页面监控完成: {context.url.url}, 慢请求: {slow_count}, 失败请求: {failed_count}",
+                )
+            else:
+                logger.debug(f"页面监控完成: {context.url.url}, 无异常请求")
 
         except Exception as e:
             logger.error(f"页面监控清理失败: {e}")
@@ -586,10 +591,14 @@ class RequestMonitor(PageProcessor):
             slow_count = sum(context.data.get("slow_requests", {}).values())
             failed_count = sum(context.data.get("failed_requests", {}).values())
             
-            logger.info(
-                f"请求监控完成: {context.url.url}, "
-                f"屏蔽URL模式: {blocked_patterns_count}, 慢请求: {slow_count}, 失败请求: {failed_count}"
-            )
+            # 只有在有屏蔽模式、慢请求或失败请求时才记录日志
+            if blocked_patterns_count > 0 or slow_count > 0 or failed_count > 0:
+                logger.info(
+                    f"请求监控完成: {context.url.url}, "
+                    f"屏蔽URL模式: {blocked_patterns_count}, 慢请求: {slow_count}, 失败请求: {failed_count}"
+                )
+            else:
+                logger.debug(f"请求监控完成: {context.url.url}, 无异常请求")
             
         except Exception as e:
             logger.error(f"请求监控清理失败: {e}")
@@ -762,11 +771,19 @@ class LinksFinder(PageProcessor):
     async def _extract_links_from_container(self, page, container_selector: str, source_domain: str) -> list[str]:
         """从指定容器中提取所有有效链接"""
         try:
+            logger.info(f"开始从容器提取链接: {container_selector}")
+            
             # 使用JavaScript在页面中提取链接
             links = await page.evaluate(f"""
                 () => {{
                     const container = document.querySelector('{container_selector}');
-                    if (!container) return [];
+                    console.log('容器选择器:', '{container_selector}');
+                    console.log('找到的容器:', container);
+                    
+                    if (!container) {{
+                        console.log('未找到匹配的容器元素');
+                        return [];
+                    }}
                     
                     const links = [];
                     
@@ -777,21 +794,28 @@ class LinksFinder(PageProcessor):
                     
                     // 查找容器下的所有a标签
                     const aElements = container.querySelectorAll('a[href]');
+                    console.log('找到的链接数量:', aElements.length);
+                    
                     for (const a of aElements) {{
                         if (a.href) {{
+                            console.log('发现链接:', a.href);
                             links.push(a.href);
                         }}
                     }}
                     
+                    console.log('总共提取的链接:', links.length);
                     return links;
                 }}
             """)
+            
+            logger.info(f"JavaScript返回的链接数量: {len(links)}")
             
             # 过滤和验证链接
             valid_links = []
             for link in links:
                 if self._is_valid_url(link):
                     valid_links.append(link)
+                    logger.debug(f"有效链接: {link}")
                     
                     # 更新指标
                     link_domain, _ = self._get_domain_path(link)
@@ -799,6 +823,8 @@ class LinksFinder(PageProcessor):
                         domain=link_domain,
                         source_domain=source_domain,
                     ).inc()
+                else:
+                    logger.debug(f"无效链接被过滤: {link}")
             
             # 更新发现链接总数指标
             total_discovered = len(links)
@@ -881,7 +907,10 @@ class LinksFinder(PageProcessor):
         # 在页面进入就绪状态时启动
         page_state = context.data.get("page_state", "loading")
         
+        logger.debug(f"LinksFinder检测状态: {context.url.url}, 页面状态: {page_state}")
+        
         if page_state in ("ready", "completed"):
+            logger.info(f"LinksFinder准备启动: {context.url.url}, 页面状态: {page_state}")
             return ProcessorState.READY
         
         return ProcessorState.WAITING
@@ -927,7 +956,7 @@ class LinksFinder(PageProcessor):
             self._completed_executed = True
             
             # 标记执行完成
-            logger.info(f"链接发现完成: {context.url.url}")
+            logger.debug(f"链接发现执行完成: {context.url.url}")
         
         # 记录处理时间
         if self._start_time:
@@ -1336,7 +1365,10 @@ class ElementCleaner(PageProcessor):
         url_str = current_url.url if current_url else "unknown"
         
         if self.state == ProcessorState.COMPLETED:
-            logger.info(f"元素清理完成: {url_str}, 删除了 {self._elements_removed} 个元素")
+            if self._elements_removed > 0:
+                logger.info(f"元素清理完成: {url_str}, 删除了 {self._elements_removed} 个元素")
+            else:
+                logger.debug(f"元素清理完成: {url_str}, 无需清理元素")
         elif self.state == ProcessorState.CANCELLED:
             logger.warning(f"元素清理取消: {url_str}")
         else:
@@ -1528,7 +1560,7 @@ class ContentFinder(PageProcessor):
                     context.data["core_content_processed"] = True
                 self._set_state(ProcessorState.COMPLETED)
             else:
-                logger.info(f"内容查找完成: {url_str}, 没有需要清理的兄弟节点")
+                logger.debug(f"内容查找完成: {url_str}, 没有需要清理的兄弟节点")
                 # 即使没有清理兄弟节点，也认为核心内容已处理
                 if hasattr(context, 'data') and context.data is not None:
                     context.data["core_content_processed"] = True

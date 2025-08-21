@@ -211,13 +211,21 @@ class TestChromiumManager:
         mock_context.new_page = AsyncMock(side_effect=[mock_page1, mock_page2])
         manager._context = mock_context
         
-        # 模拟页面的goto方法
-        mock_page1.goto = AsyncMock()
-        mock_page2.goto = AsyncMock()
-        mock_page1.evaluate = AsyncMock()
-        mock_page2.evaluate = AsyncMock()
+        # 模拟页面的goto方法和评估
+        mock_response1 = Mock()
+        mock_response1.status = 200
+        mock_response2 = Mock()
+        mock_response2.status = 200
         
-        await manager._open_new_tabs()
+        mock_page1.goto = AsyncMock(return_value=mock_response1)
+        mock_page2.goto = AsyncMock(return_value=mock_response2)
+        mock_page1.evaluate = AsyncMock(return_value="complete")
+        mock_page2.evaluate = AsyncMock(return_value="complete")
+        
+        # 模拟网络预检测，让它失败以跳过预检测
+        with patch('aiohttp.ClientSession.head') as mock_head:
+            mock_head.side_effect = Exception("网络错误")
+            await manager._open_new_tabs()
         
         # 验证打开了2个标签页（最大并发数）
         assert len(manager._active_pages) == 2

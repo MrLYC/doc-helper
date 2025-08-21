@@ -304,8 +304,8 @@ class TestProcessors:
         
         await monitor.finish(mock_page_context)
         
-        # 验证清理
-        mock_page_context.page.close.assert_called_once()
+        # 验证清理 - 注意：PageMonitor.finish() 不再关闭页面，页面由ChromiumManager管理
+        # mock_page_context.page.close.assert_called_once()  # 移除这个断言
         assert len(monitor._request_start_times) == 0
         assert monitor.state == ProcessorState.FINISHED
     

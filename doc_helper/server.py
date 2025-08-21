@@ -223,8 +223,8 @@ def create_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-t", "--page-timeout",
         type=float,
-        default=120.0,
-        help="页面超时时间（秒） (默认: 120.0)"
+        default=600.0,
+        help="页面超时时间（秒） (默认: 600.0)"
     )
     
     parser.add_argument(
@@ -396,23 +396,30 @@ def generate_default_url_patterns(entry_urls: List[str]) -> List[str]:
             
             # 获取域名
             domain = parsed.netloc
-            # 获取路径，移除文件名，保留目录
+            # 获取路径，取父目录
             path = parsed.path.rstrip('/')
-            if path and not path.endswith('/'):
-                # 如果路径看起来像文件（有扩展名），则移除文件名
-                if '.' in path.split('/')[-1]:
-                    path = '/'.join(path.split('/')[:-1])
             
-            # 确保路径以 / 开头
-            if not path.startswith('/'):
+            # 获取父目录路径
+            if path:
+                # 移除最后一个路径段，保留父目录
+                path_parts = path.split('/')
+                if len(path_parts) > 1:
+                    path = '/'.join(path_parts[:-1])
+                else:
+                    path = ''
+            
+            # 确保路径以 / 开头（如果不为空）
+            if path and not path.startswith('/'):
                 path = '/' + path
+            elif not path:
+                path = ''
             
             # 转义特殊字符，生成正则表达式模式
             domain_escaped = re.escape(domain)
-            path_escaped = re.escape(path)
+            path_escaped = re.escape(path) if path else ''
             
-            # 生成模式：协议://域名/路径/...
-            pattern = f"https?://{domain_escaped}{path_escaped}/.*"
+            # 生成模式：^协议://域名/路径/.*
+            pattern = f"^https?://{domain_escaped}{path_escaped}/.*"
             patterns.append(pattern)
             
             logger.info(f"为 {url} 生成URL模式: {pattern}")
@@ -446,7 +453,7 @@ def parse_config_from_args(args: argparse.Namespace) -> ServerConfig:
     config.content_selector = args.content_selector
     
     # URL模式配置
-    if hasattr(args, 'url_patterns') and args.url_patterns:
+    if hasattr(args, 'url_patterns') and args.url_patterns is not None:
         config.url_patterns = args.url_patterns
         logger.info(f"使用用户指定的URL模式: {config.url_patterns}")
     else:

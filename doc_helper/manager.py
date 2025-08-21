@@ -252,19 +252,40 @@ class ChromiumManager(PageManager):
                             # 如果没有活跃页面，检查是否需要重试
                             if not self._active_pages:
                                 logger.info(f"没有活跃页面，pending URLs: {pending_count}")
-                                if await self._handle_retry():
-                                    logger.info("重试逻辑返回True，继续循环")
-                                    continue
-                                else:
-                                    logger.info("重试逻辑返回False或无重试，准备退出")
-                                    # 检查是否还有pending的URL
-                                    remaining_pending = len(self.url_collection.get_by_status(URLStatus.PENDING))
-                                    if remaining_pending > 0:
-                                        logger.warning(f"仍有 {remaining_pending} 个pending URL，但无活跃页面，可能存在问题")
+                                
+                                # 检查是否所有URL都已处理完成
+                                total_urls = len(self.url_collection.get_all_urls())
+                                visited_urls = len(self.url_collection.get_by_status(URLStatus.VISITED))
+                                failed_urls = len(self.url_collection.get_by_status(URLStatus.FAILED))
+                                processed_urls = visited_urls + failed_urls
+                                
+                                logger.info(f"URL处理状态 - 总计: {total_urls}, 已访问: {visited_urls}, 已失败: {failed_urls}, 待处理: {pending_count}")
+                                
+                                # 如果所有URL都已处理完成，退出主循环
+                                if pending_count == 0 and processed_urls == total_urls:
+                                    logger.info(f"所有URL都已处理完成，总计: {total_urls}, 成功: {visited_urls}, 失败: {failed_urls}")
+                                    break
+                                
+                                # 如果还有pending URL但没有活跃页面，尝试重试逻辑
+                                if pending_count > 0:
+                                    if await self._handle_retry():
+                                        logger.info("重试逻辑返回True，继续循环")
+                                        continue
+                                    else:
+                                        logger.info("重试逻辑返回False或无重试，但仍有pending URL")
                                         # 继续尝试一段时间
                                         if loop_count < 10:  # 最多尝试10次
+                                            logger.warning(f"仍有 {pending_count} 个pending URL，继续尝试 (第{loop_count}次)")
                                             await asyncio.sleep(2)  # 等待2秒再试
                                             continue
+                                        else:
+                                            logger.warning(f"已尝试10次，仍有 {pending_count} 个pending URL无法处理，强制退出")
+                                            break
+                                
+                                # 如果没有pending URL但也没有处理完所有URL，可能存在异常情况
+                                if pending_count == 0 and processed_urls < total_urls:
+                                    remaining_urls = total_urls - processed_urls
+                                    logger.warning(f"存在 {remaining_urls} 个URL既不是pending也不是processed状态，可能存在问题")
                                     break
                             
                             # 3-6. 处理活跃页面
@@ -284,6 +305,23 @@ class ChromiumManager(PageManager):
                             
                 finally:
                     await self._cleanup_all()
+                    
+                    # 添加最终的处理统计
+                    final_total = len(self.url_collection.get_all_urls())
+                    final_visited = len(self.url_collection.get_by_status(URLStatus.VISITED))
+                    final_failed = len(self.url_collection.get_by_status(URLStatus.FAILED))
+                    final_pending = len(self.url_collection.get_by_status(URLStatus.PENDING))
+                    
+                    logger.info("="*50)
+                    logger.info("页面处理任务完成统计:")
+                    logger.info(f"  总 URL 数量: {final_total}")
+                    logger.info(f"  成功处理: {final_visited}")
+                    logger.info(f"  处理失败: {final_failed}")
+                    logger.info(f"  未处理: {final_pending}")
+                    if final_total > 0:
+                        success_rate = (final_visited / final_total) * 100
+                        logger.info(f"  成功率: {success_rate:.1f}%")
+                    logger.info("="*50)
                     
         except Exception as e:
             logger.error(f"页面管理器启动失败: {e}")
@@ -542,7 +580,7 @@ class ChromiumManager(PageManager):
                         result="success"
                     ).inc()
                     
-                    logger.info(f"处理器 {processor_name} 运行完成 for {context.url.url} (耗时: {run_duration:.3f}s)")
+                    logger.debug(f"处理器 {processor_name} 运行完成 for {context.url.url} (耗时: {run_duration:.3f}s)")
                     completed_processors.append(processor)
                     continue
                 
