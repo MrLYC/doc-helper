@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Response, Request, Depends
 from fastapi.responses import PlainTextResponse, JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST
 
@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 manager: Optional[ChromiumManager] = None
 processing_task: Optional[asyncio.Task] = None
 shutdown_event = asyncio.Event()
+server_config = None  # 将在main函数中设置为ServerConfig实例
 
 
 @asynccontextmanager
@@ -116,6 +117,25 @@ class ServerConfig:
         self.host: str = "127.0.0.1"
         self.port: int = 8000
         self.log_level: str = "INFO"
+        self.auth_token: Optional[str] = None
+
+
+def verify_auth_token(request: Request) -> None:
+    """验证认证令牌"""
+    global server_config
+    
+    if not server_config or not server_config.auth_token:
+        # 如果没有设置认证令牌，则跳过验证
+        return
+    
+    # 从查询参数中获取token
+    token = request.query_params.get('token')
+    
+    if not token or token != server_config.auth_token:
+        raise HTTPException(
+            status_code=401,
+            detail="访问被拒绝：无效的认证令牌。请在URL中添加 ?token=<your_token> 参数。"
+        )
 
 
 def create_argument_parser() -> argparse.ArgumentParser:
@@ -126,13 +146,19 @@ def create_argument_parser() -> argparse.ArgumentParser:
         epilog="""
 示例用法:
   # 基本使用
-  python server.py -u https://example.com -o /output/docs.pdf
+  python -m doc_helper -u https://example.com -o /output/docs.pdf
 
   # 使用输出目录
-  python server.py -u https://example.com -O /output
+  python -m doc_helper -u https://example.com -O /output
+
+  # 启动服务器模式
+  python -m doc_helper --server --host 0.0.0.0 --port 8080
+
+  # 启用认证的服务器模式
+  python -m doc_helper --server --auth-token "your-secret-token"
 
   # 高级配置
-  python server.py \\
+  python -m doc_helper \\
     --urls https://site1.com https://site2.com \\
     --concurrent-tabs 5 \\
     --page-timeout 120 \\
@@ -143,6 +169,12 @@ def create_argument_parser() -> argparse.ArgumentParser:
     --max-depth 3 \\
     --block-patterns ".*\\.gif" ".*analytics.*" \\
     --clean-selector "*[id*='ad'], .popup" \\
+    --find-links \\
+    --auth-token "api-secret-123"
+
+  # 服务器模式API访问（启用认证时）：
+  curl "http://localhost:8000/status?token=api-secret-123"
+  curl "http://localhost:8000/snapshot/0?token=api-secret-123" -o screenshot.png
     --content-selector "main article" \\
     --verbose
 
@@ -182,7 +214,7 @@ def create_argument_parser() -> argparse.ArgumentParser:
     
     # 页面处理配置
     parser.add_argument(
-        "-c", "--concurrent-tabs",
+        "-T", "--concurrent-tabs",
         type=int,
         default=3,
         help="并发标签页数量 (默认: 3)"
@@ -191,8 +223,8 @@ def create_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-t", "--page-timeout",
         type=float,
-        default=60.0,
-        help="页面超时时间（秒） (默认: 60.0)"
+        default=120.0,
+        help="页面超时时间（秒） (默认: 120.0)"
     )
     
     parser.add_argument(
@@ -224,19 +256,19 @@ def create_argument_parser() -> argparse.ArgumentParser:
     
     # 处理器配置
     parser.add_argument(
-        "--links-selector",
+        "-l", "--links-selector",
         default="body a",
         help="链接发现的 CSS 选择器 (默认: 'body a')"
     )
     
     parser.add_argument(
-        "--clean-selector",
+        "-C", "--clean-selector",
         default="*[id*='ad'], *[class*='popup'], script[src*='analytics']",
         help="元素清理的 CSS 选择器 (默认: 清理广告和弹窗)"
     )
     
     parser.add_argument(
-        "--content-selector", 
+        "-c", "--content-selector", 
         default="main, article, .content, #content",
         help="内容查找的 CSS 选择器 (默认: 'main, article, .content, #content')"
     )
@@ -256,7 +288,7 @@ def create_argument_parser() -> argparse.ArgumentParser:
     
     # 请求监控配置
     parser.add_argument(
-        "--block-patterns",
+        "-P", "--block-patterns",
         nargs="*",
         default=[
             ".*\\.gif", ".*\\.jpg", ".*\\.png", ".*\\.css", ".*\\.js",
@@ -339,6 +371,11 @@ def create_argument_parser() -> argparse.ArgumentParser:
         help="日志级别 (默认: INFO)"
     )
     
+    parser.add_argument(
+        "-a", "--auth-token",
+        help="API访问认证令牌。设置后，所有API请求都需要包含 ?token=<value> 参数"
+    )
+    
     return parser
 
 
@@ -404,6 +441,7 @@ def parse_config_from_args(args: argparse.Namespace) -> ServerConfig:
     config.host = args.host
     config.port = args.port
     config.log_level = args.log_level
+    config.auth_token = getattr(args, 'auth_token', None)
     
     return config
 
@@ -531,7 +569,7 @@ async def merge_pdfs(pdf_files: List[str], config: ServerConfig) -> List[str]:
 # API 路由
 
 @app.get("/")
-async def root():
+async def root(_: None = Depends(verify_auth_token)):
     """根路径"""
     return {
         "message": "PDF 文档爬虫服务器",
@@ -541,7 +579,7 @@ async def root():
 
 
 @app.get("/health")
-async def health_check():
+async def health_check(_: None = Depends(verify_auth_token)):
     """健康检查"""
     global manager, processing_task
     
@@ -565,7 +603,7 @@ async def health_check():
 
 
 @app.get("/metrics")
-async def get_metrics():
+async def get_metrics(_: None = Depends(verify_auth_token)):
     """获取 Prometheus 指标"""
     global manager
     
@@ -587,7 +625,7 @@ async def get_metrics():
 
 
 @app.get("/status")
-async def get_status():
+async def get_status(_: None = Depends(verify_auth_token)):
     """获取详细状态信息"""
     global manager, processing_task
     
@@ -627,43 +665,8 @@ async def get_status():
     return status
 
 
-@app.post("/start")
-async def start_processing():
-    """开始页面处理"""
-    global processing_task
-    
-    if processing_task and not processing_task.done():
-        return {"status": "already_running", "message": "页面处理已在运行"}
-    
-    # 从环境变量或默认配置获取参数
-    # 这里简化处理，实际使用中应该从请求体或配置文件获取
-    logger.warning("start_processing 接口需要额外配置，当前使用默认参数")
-    
-    return {"status": "error", "message": "请使用命令行启动服务器"}
-
-
-@app.post("/stop")
-async def stop_processing():
-    """停止页面处理"""
-    global processing_task, shutdown_event
-    
-    if not processing_task or processing_task.done():
-        return {"status": "not_running", "message": "页面处理未在运行"}
-    
-    logger.info("收到停止处理请求")
-    shutdown_event.set()
-    
-    try:
-        processing_task.cancel()
-        await processing_task
-    except asyncio.CancelledError:
-        pass
-    
-    return {"status": "stopped", "message": "页面处理已停止"}
-
-
 @app.get("/pages")
-async def get_active_pages():
+async def get_active_pages(_: None = Depends(verify_auth_token)):
     """获取所有活跃页面的信息"""
     global manager
     
@@ -683,7 +686,7 @@ async def get_active_pages():
 
 
 @app.get("/snapshot/{slot}")
-async def get_page_snapshot(slot: int):
+async def get_page_snapshot(slot: int, _: None = Depends(verify_auth_token)):
     """获取指定槽位页面的截图"""
     global manager
     
@@ -792,12 +795,15 @@ async def run_server(config: ServerConfig):
 
 def main():
     """主函数"""
+    global server_config
+    
     # 解析命令行参数
     parser = create_argument_parser()
     args = parser.parse_args()
     
     # 解析配置
     config = parse_config_from_args(args)
+    server_config = config  # 设置全局配置
     
     # 设置日志
     setup_logging(config.log_level)
@@ -811,6 +817,10 @@ def main():
     logger.info(f"临时目录: {config.temp_dir}")
     logger.info(f"可视化模式: {config.verbose}")
     logger.info(f"服务器地址: http://{config.host}:{config.port}")
+    if config.auth_token:
+        logger.info(f"认证已启用，需要token参数访问API")
+    else:
+        logger.info("未设置认证，API可自由访问")
     
     if config.max_pages:
         logger.info(f"最大页数限制: {config.max_pages}")

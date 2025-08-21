@@ -4,6 +4,26 @@
 
 新增的截图API功能允许用户通过HTTP接口获取当前正在处理的页面的实时截图。这对于监控页面处理进度、调试页面内容和可视化爬取过程非常有用。
 
+## 认证功能
+
+为了保护API安全，系统支持基于令牌的认证：
+
+- 通过 `-a/--auth-token` 参数启用认证
+- 启用认证后，所有API请求都需要在URL中包含 `?token=<your-token>` 查询参数
+- 未提供或错误的令牌将返回401未授权错误
+- 如果未设置认证令牌，API可以自由访问
+
+### 启用认证示例
+
+```bash
+# 启动带认证的服务器
+python -m doc_helper --server --auth-token "your-secret-token"
+
+# 访问API时需要包含token
+curl "http://localhost:8000/status?token=your-secret-token"
+curl "http://localhost:8000/snapshot/0?token=your-secret-token" -o screenshot.png
+```
+
 ## API接口
 
 ### 1. 获取活跃页面列表
@@ -73,17 +93,23 @@ Cache-Control: no-cache, no-store, must-revalidate
 ### 命令行工具
 
 ```bash
-# 启动服务器
+# 启动不带认证的服务器
 python -m doc_helper --server
+
+# 启动带认证的服务器
+python -m doc_helper --server --auth-token "my-secret-123"
 
 # 在另一个终端启动页面处理
 python -m doc_helper https://example.com --find-links
 
-# 获取页面列表
+# 获取页面列表（无认证）
 curl http://localhost:8000/pages
 
-# 获取槽位0的截图
-curl http://localhost:8000/snapshot/0 -o screenshot.png
+# 获取页面列表（带认证）
+curl "http://localhost:8000/pages?token=my-secret-123"
+
+# 获取槽位0的截图（带认证）
+curl "http://localhost:8000/snapshot/0?token=my-secret-123" -o screenshot.png
 ```
 
 ### Python代码示例
@@ -92,50 +118,83 @@ curl http://localhost:8000/snapshot/0 -o screenshot.png
 import aiohttp
 import asyncio
 
-async def get_page_screenshot(slot):
+async def get_page_screenshot(slot, auth_token=None):
+    base_url = "http://localhost:8000"
+    
+    # 构建URL
+    url = f"{base_url}/snapshot/{slot}"
+    if auth_token:
+        url += f"?token={auth_token}"
+    
     async with aiohttp.ClientSession() as session:
-        async with session.get(f"http://localhost:8000/snapshot/{slot}") as resp:
+        async with session.get(url) as resp:
             if resp.status == 200:
                 screenshot_data = await resp.read()
                 with open(f"page_{slot}.png", "wb") as f:
                     f.write(screenshot_data)
                 print(f"截图已保存到 page_{slot}.png")
+            elif resp.status == 401:
+                print("认证失败：无效的token")
             else:
                 print(f"获取截图失败: {resp.status}")
 
-# 运行示例
+# 无认证访问
 asyncio.run(get_page_screenshot(0))
+
+# 带认证访问
+asyncio.run(get_page_screenshot(0, "your-secret-token"))
 ```
 
 ### JavaScript示例
 
 ```javascript
 // 获取页面列表
-async function getActivePages() {
-    const response = await fetch('http://localhost:8000/pages');
+async function getActivePages(authToken = null) {
+    let url = 'http://localhost:8000/pages';
+    if (authToken) {
+        url += `?token=${authToken}`;
+    }
+    
+    const response = await fetch(url);
+    if (response.status === 401) {
+        console.error('认证失败：无效的token');
+        return null;
+    }
+    
     const data = await response.json();
     console.log('活跃页面:', data.pages);
     return data.pages;
 }
 
 // 获取页面截图
-async function getPageScreenshot(slot) {
-    const response = await fetch(`http://localhost:8000/snapshot/${slot}`);
+async function getPageScreenshot(slot, authToken = null) {
+    let url = `http://localhost:8000/snapshot/${slot}`;
+    if (authToken) {
+        url += `?token=${authToken}`;
+    }
+    
+    const response = await fetch(url);
     if (response.ok) {
         const blob = await response.blob();
-        const url = URL.createObjectURL(blob);
+        const objectUrl = URL.createObjectURL(blob);
         
         // 创建下载链接
         const a = document.createElement('a');
-        a.href = url;
+        a.href = objectUrl;
         a.download = `page_snapshot_slot_${slot}.png`;
         a.click();
         
-        URL.revokeObjectURL(url);
+        URL.revokeObjectURL(objectUrl);
+    } else if (response.status === 401) {
+        console.error('认证失败：无效的token');
     } else {
         console.error('获取截图失败:', response.status);
     }
 }
+
+// 使用示例
+getActivePages('your-token');
+getPageScreenshot(0, 'your-token');
 ```
 
 ## 技术实现

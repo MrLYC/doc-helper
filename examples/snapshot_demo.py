@@ -8,24 +8,41 @@
 import asyncio
 import aiohttp
 import json
+import os
+import sys
 
 
-async def demo_snapshot_api():
+async def demo_snapshot_api(auth_token: str = None):
     """演示截图API的使用"""
     
     # 服务器地址
     base_url = "http://localhost:8000"
     
+    # 构建查询参数
+    def build_url(endpoint: str) -> str:
+        url = f"{base_url}{endpoint}"
+        if auth_token:
+            separator = "&" if "?" in endpoint else "?"
+            url += f"{separator}token={auth_token}"
+        return url
+    
     async with aiohttp.ClientSession() as session:
         
         print("📊 获取服务器状态...")
         try:
-            async with session.get(f"{base_url}/status") as resp:
+            async with session.get(build_url("/status")) as resp:
                 if resp.status == 200:
                     status = await resp.json()
                     print(f"✅ 服务器状态: {status}")
+                elif resp.status == 401:
+                    print("❌ 认证失败: 无效的token或缺少token参数")
+                    print("请使用正确的token运行: python examples/snapshot_demo.py <your-token>")
+                    return
                 else:
                     print(f"❌ 服务器不可访问 (状态码: {resp.status})")
+                    if resp.status == 401:
+                        error_text = await resp.text()
+                        print(f"   错误信息: {error_text}")
                     return
         except aiohttp.ClientError as e:
             print(f"❌ 无法连接到服务器: {e}")
@@ -34,7 +51,7 @@ async def demo_snapshot_api():
         
         print("\n📋 获取活跃页面列表...")
         try:
-            async with session.get(f"{base_url}/pages") as resp:
+            async with session.get(build_url("/pages")) as resp:
                 if resp.status == 200:
                     pages_info = await resp.json()
                     total_pages = pages_info.get("total_pages", 0)
@@ -49,6 +66,9 @@ async def demo_snapshot_api():
                     for page in pages_info.get("pages", []):
                         print(f"   槽位 {page['slot']}: {page['url']} (标题: {page.get('title', '未知')})")
                     
+                elif resp.status == 401:
+                    print("❌ 认证失败: 无效的token")
+                    return
                 else:
                     print(f"❌ 获取页面列表失败 (状态码: {resp.status})")
                     return
@@ -61,7 +81,7 @@ async def demo_snapshot_api():
             slot = 0
             print(f"\n📸 获取槽位 {slot} 的页面截图...")
             try:
-                async with session.get(f"{base_url}/snapshot/{slot}") as resp:
+                async with session.get(build_url(f"/snapshot/{slot}")) as resp:
                     if resp.status == 200:
                         screenshot_data = await resp.read()
                         filename = f"page_snapshot_slot_{slot}.png"
@@ -84,7 +104,7 @@ async def demo_snapshot_api():
         # 测试无效槽位
         print(f"\n🔍 测试无效槽位 (槽位 999)...")
         try:
-            async with session.get(f"{base_url}/snapshot/999") as resp:
+            async with session.get(build_url("/snapshot/999")) as resp:
                 if resp.status == 404:
                     print("✅ 正确返回 404 错误")
                 else:
@@ -98,8 +118,16 @@ def main():
     print("🚀 截图API演示")
     print("=" * 50)
     
+    # 检查命令行参数中是否有token
+    auth_token = None
+    if len(sys.argv) > 1:
+        auth_token = sys.argv[1]
+        print(f"🔒 使用认证令牌: {auth_token[:8]}...")
+    else:
+        print("🔓 未提供认证令牌，假设服务器未启用认证")
+    
     try:
-        asyncio.run(demo_snapshot_api())
+        asyncio.run(demo_snapshot_api(auth_token))
     except KeyboardInterrupt:
         print("\n\n👋 演示被用户中断")
     except Exception as e:
@@ -108,11 +136,13 @@ def main():
     print("\n" + "=" * 50)
     print("📝 使用说明:")
     print("1. 启动服务器: python -m doc_helper --server")
-    print("2. 在另一个终端启动页面处理: python -m doc_helper https://example.com --find-links")
-    print("3. 运行此演示: python examples/snapshot_demo.py")
+    print("2. 启用认证: python -m doc_helper --server --auth-token 'your-secret'")
+    print("3. 在另一个终端启动页面处理: python -m doc_helper https://example.com --find-links")
+    print("4. 运行此演示: python examples/snapshot_demo.py [auth-token]")
     print("\n🌐 API端点:")
     print("- GET /pages - 获取活跃页面列表")
     print("- GET /snapshot/<slot> - 获取指定槽位的页面截图")
+    print("- 需要认证时在URL后添加: ?token=<your-token>")
 
 
 if __name__ == "__main__":
