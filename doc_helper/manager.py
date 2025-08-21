@@ -396,9 +396,11 @@ class ChromiumManager(PageManager):
     async def _open_new_tabs(self) -> None:
         """获取待访问的URLs并打开新标签页"""
         # 计算还能打开多少个标签页
-        available_slots = self.config.max_concurrent_tabs - len(self._active_pages)
+        current_active_count = len(self._active_pages)
+        available_slots = self.config.max_concurrent_tabs - current_active_count
+        
         if available_slots <= 0:
-            logger.debug("没有可用槽位，跳过打开新标签页")
+            logger.debug(f"已达到最大并发数 {self.config.max_concurrent_tabs}，当前活跃页面: {current_active_count}，跳过打开新标签页")
             return
         
         # 获取待访问的URLs
@@ -412,14 +414,24 @@ class ChromiumManager(PageManager):
             logger.debug("没有待访问的URLs")
             return
         
-        logger.info(f"打开 {len(pending_urls)} 个新标签页，可用槽位: {available_slots}")
+        # 确保不会超过最大并发数限制
+        urls_to_process = pending_urls[:available_slots]
+        
+        logger.info(f"准备打开 {len(urls_to_process)} 个新标签页，当前活跃: {current_active_count}/{self.config.max_concurrent_tabs}")
         
         # 为每个URL打开标签页并创建页面上下文
-        for url in pending_urls:
+        successfully_opened = 0
+        for url in urls_to_process:
+            # 在每次循环前检查是否仍有可用槽位
+            current_count = len(self._active_pages)
+            if current_count >= self.config.max_concurrent_tabs:
+                logger.warning(f"已达到最大并发数 {self.config.max_concurrent_tabs}，停止打开更多标签页")
+                break
+                
             start_time = time.time()
             page = None
             try:
-                logger.info(f"开始打开标签页: {url.url}")
+                logger.info(f"开始打开标签页 [{current_count + 1}/{self.config.max_concurrent_tabs}]: {url.url}")
                 
                 # 先将URL标记为正在处理，避免重复处理
                 # 注意：这里不改变URL状态，只是为了避免重复选择
@@ -500,12 +512,13 @@ class ChromiumManager(PageManager):
                 
                 self._active_pages[url.id] = context
                 self._cancelled_processors[url.id] = set()
+                successfully_opened += 1
                 
                 # 更新活跃页面数量指标
                 self.active_pages_gauge.set(len(self._active_pages))
                 
                 elapsed_time = time.time() - start_time
-                logger.info(f"标签页已成功打开: {url.url} (耗时: {elapsed_time:.2f}s)")
+                logger.info(f"标签页已成功打开 [{len(self._active_pages)}/{self.config.max_concurrent_tabs}]: {url.url} (耗时: {elapsed_time:.2f}s)")
                 
             except Exception as e:
                 logger.error(f"打开标签页失败 {url.url}: {type(e).__name__}: {e}")
@@ -528,7 +541,7 @@ class ChromiumManager(PageManager):
                 
                 logger.info(f"URL已标记为失败: {url.url}")
         
-        logger.info(f"标签页打开完成，当前活跃页面数: {len(self._active_pages)}")
+        logger.info(f"标签页打开完成，成功打开: {successfully_opened}/{len(urls_to_process)}，当前活跃页面数: {len(self._active_pages)}/{self.config.max_concurrent_tabs}")
     
     async def _process_active_pages(self) -> None:
         """处理所有活跃页面"""
