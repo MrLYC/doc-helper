@@ -13,22 +13,37 @@ from .protocol import (
 from .manager import ChromiumManager
 
 from .processors import (
-    PageMonitor, RequestMonitor, LinksFinder, PageLoadProcessor, ContentExtractProcessor, 
-    PDFGenerateProcessor, LinkExtractProcessor, ScreenshotProcessor
+    PageLoadProcessor,
+    ContentExtractProcessor, 
+    PDFGenerateProcessor,
+    PageMonitor,
+    RequestMonitor,
+    LinksFinder,
+    ElementCleaner
 )
 
 __version__ = "1.0.0"
 
 __all__ = [
-    # 协议和数据结构
-    "URL", "URLCollection", "URLStatus",
-    "PageContext", "PageProcessor", "ProcessorState", 
-    "PageManager", "PageManagerConfig", "RetryCallback",
-    
-    # 管理器实现
+    # 协议类
+    "URL",
+    "URLCollection", 
+    "URLStatus",
+    "PageContext",
+    "PageProcessor",
+    "ProcessorState",
+    # 处理器类
+    "PageLoadProcessor",
+    "ContentExtractProcessor",
+    "PDFGenerateProcessor", 
+    "PageMonitor",
+    "RequestMonitor",
+    "LinksFinder",
+    "ElementCleaner",
+    # 管理器类
     "ChromiumManager",
-    
-    # 处理器实现
-    "PageMonitor", "RequestMonitor", "LinksFinder", "PageLoadProcessor", "ContentExtractProcessor",
-    "PDFGenerateProcessor", "LinkExtractProcessor", "ScreenshotProcessor",
+    "PageManagerConfig",
+    # 工具函数
+    "create_file_collection",
+    "create_simple_collection",
 ]
