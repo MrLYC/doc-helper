@@ -272,6 +272,7 @@ class PageProcessingBuilder:
         css_selector: str = "body a",
         priority: int = 10,
         url_pattern: Optional[str] = None,
+        url_patterns: Optional[List[str]] = None,
         max_depth: int = 12
     ) -> 'PageProcessingBuilder':
         """
@@ -280,7 +281,8 @@ class PageProcessingBuilder:
         Args:
             css_selector: CSS选择器，指定要搜索链接的容器
             priority: 处理器优先级
-            url_pattern: URL匹配的正则表达式模式
+            url_pattern: 单个URL匹配的正则表达式模式（向后兼容）
+            url_patterns: 多个URL匹配的正则表达式模式列表
             max_depth: 基于根目录的最大链接深度
             
         Returns:
@@ -290,17 +292,24 @@ class PageProcessingBuilder:
         if self._url_collection is None:
             self._url_collection = SimpleCollection()
         
+        # 处理URL模式参数兼容性
+        final_patterns = []
+        if url_patterns:
+            final_patterns = url_patterns
+        elif url_pattern:
+            final_patterns = [url_pattern]
+        
         links_finder = LinksFinder(
             name=f"links_finder_{len(self._processors)}",
             url_collection=self._url_collection,
             css_selector=css_selector,
             priority=priority,
-            url_pattern=url_pattern,
+            url_patterns=final_patterns,
             max_depth=max_depth
         )
         
         self._processors.append(links_finder)
-        pattern_info = f", URL模式: {url_pattern}" if url_pattern else ""
+        pattern_info = f", URL模式: {final_patterns}" if final_patterns else ""
         logger.info(f"添加LinksFinder，CSS选择器: {css_selector}, 最大深度: {max_depth}{pattern_info}")
         return self
     

@@ -95,7 +95,7 @@ class ServerConfig:
         self.links_selector: str = "body a"
         self.clean_selector: str = "*[id*='ad'], *[class*='popup'], script[src*='analytics']"
         self.content_selector: str = "main, article, .content, #content"
-        self.url_pattern: Optional[str] = None
+        self.url_patterns: List[str] = []
         self.max_depth: int = 12
         
         # 请求监控配置
@@ -165,7 +165,7 @@ def create_argument_parser() -> argparse.ArgumentParser:
     -o /output/combined_docs.pdf \\
     --max-pages 1000 \\
     --max-file-size 50 \\
-    --url-pattern ".*\\/docs\\/.*" \\
+    --url-patterns ".*\\/docs\\/.*" ".*\\/api\\/.*" \\
     --max-depth 3 \\
     --block-patterns ".*\\.gif" ".*analytics.*" \\
     --clean-selector "*[id*='ad'], .popup" \\
@@ -184,7 +184,7 @@ def create_argument_parser() -> argparse.ArgumentParser:
     -o /data/documentation.pdf \\
     -c 10 \\
     -t 180 \\
-    -p ".*\\/api\\/.*|.*\\/guide\\/.*" \\
+    --url-patterns ".*\\/api\\/.*" ".*\\/guide\\/.*" \\
     --max-depth 5 \\
     --host 0.0.0.0 \\
     --port 8080
@@ -274,9 +274,10 @@ def create_argument_parser() -> argparse.ArgumentParser:
     )
     
     parser.add_argument(
-        "-p", "--url-pattern",
-        dest="url_pattern",
-        help="LinksFinder 可以选择的 URL 正则表达式模式"
+        "-p", "--url-patterns",
+        dest="url_patterns",
+        nargs="*",
+        help="LinksFinder 可以选择的 URL 正则表达式模式列表。如果未指定，将自动为每个入口URL生成对应的目录模式"
     )
     
     parser.add_argument(
@@ -353,8 +354,8 @@ def create_argument_parser() -> argparse.ArgumentParser:
     # 服务器配置
     parser.add_argument(
         "--host",
-        default="127.0.0.1",
-        help="服务器监听地址 (默认: '127.0.0.1')"
+        default="0.0.0.0",
+        help="服务器监听地址 (默认: '0.0.0.0')"
     )
     
     parser.add_argument(
@@ -373,10 +374,54 @@ def create_argument_parser() -> argparse.ArgumentParser:
     
     parser.add_argument(
         "-a", "--auth-token",
+        default="doc-helper",
         help="API访问认证令牌。设置后，所有API请求都需要包含 ?token=<value> 参数"
     )
     
     return parser
+
+
+def generate_default_url_patterns(entry_urls: List[str]) -> List[str]:
+    """为入口URL生成默认的URL模式（基于目录路径）"""
+    import re
+    from urllib.parse import urlparse
+    
+    patterns = []
+    
+    for url in entry_urls:
+        try:
+            parsed = urlparse(url)
+            if not parsed.netloc:
+                continue
+            
+            # 获取域名
+            domain = parsed.netloc
+            # 获取路径，移除文件名，保留目录
+            path = parsed.path.rstrip('/')
+            if path and not path.endswith('/'):
+                # 如果路径看起来像文件（有扩展名），则移除文件名
+                if '.' in path.split('/')[-1]:
+                    path = '/'.join(path.split('/')[:-1])
+            
+            # 确保路径以 / 开头
+            if not path.startswith('/'):
+                path = '/' + path
+            
+            # 转义特殊字符，生成正则表达式模式
+            domain_escaped = re.escape(domain)
+            path_escaped = re.escape(path)
+            
+            # 生成模式：协议://域名/路径/...
+            pattern = f"https?://{domain_escaped}{path_escaped}/.*"
+            patterns.append(pattern)
+            
+            logger.info(f"为 {url} 生成URL模式: {pattern}")
+            
+        except Exception as e:
+            logger.warning(f"无法为URL {url} 生成模式: {e}")
+            continue
+    
+    return patterns
 
 
 def parse_config_from_args(args: argparse.Namespace) -> ServerConfig:
@@ -399,7 +444,16 @@ def parse_config_from_args(args: argparse.Namespace) -> ServerConfig:
     config.links_selector = args.links_selector
     config.clean_selector = args.clean_selector
     config.content_selector = args.content_selector
-    config.url_pattern = args.url_pattern
+    
+    # URL模式配置
+    if hasattr(args, 'url_patterns') and args.url_patterns:
+        config.url_patterns = args.url_patterns
+        logger.info(f"使用用户指定的URL模式: {config.url_patterns}")
+    else:
+        # 生成默认的URL模式
+        config.url_patterns = generate_default_url_patterns(config.entry_urls)
+        logger.info(f"自动生成URL模式: {config.url_patterns}")
+    
     config.max_depth = args.max_depth
     
     # 请求监控配置
@@ -484,7 +538,7 @@ def create_manager_from_config(config: ServerConfig) -> ChromiumManager:
     # 添加链接发现
     builder = builder.find_links(
         css_selector=config.links_selector,
-        url_pattern=config.url_pattern,
+        url_patterns=config.url_patterns,
         max_depth=config.max_depth
     )
     

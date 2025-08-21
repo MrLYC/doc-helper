@@ -606,7 +606,8 @@ class LinksFinder(PageProcessor):
         url_collection: URLCollection,
         css_selector: str = "body",
         priority: int = 10,
-        url_pattern: Optional[str] = None,
+        url_pattern: Optional[str] = None,  # 向后兼容
+        url_patterns: Optional[List[str]] = None,
         max_depth: int = 12,
     ):
         """
@@ -617,29 +618,39 @@ class LinksFinder(PageProcessor):
             url_collection: URL集合，用于添加发现的链接
             css_selector: CSS选择器，指定要搜索链接的容器
             priority: 优先级，固定为10
-            url_pattern: URL匹配的正则表达式模式
+            url_pattern: 单个URL匹配的正则表达式模式（向后兼容）
+            url_patterns: 多个URL匹配的正则表达式模式列表
             max_depth: 基于根目录的最大链接深度
 
         """
         super().__init__(name, priority)
         self.url_collection = url_collection
         self.css_selector = css_selector
-        self.url_pattern = url_pattern
+        
+        # 处理URL模式参数兼容性
+        self.url_patterns = []
+        if url_patterns:
+            self.url_patterns = url_patterns
+        elif url_pattern:
+            self.url_patterns = [url_pattern]
+        
         self.max_depth = max_depth
         self._ready_executed = False
         self._completed_executed = False
         self._start_time = None
         
         # 编译正则表达式模式
-        self._url_regex = None
-        if url_pattern:
+        self._url_regexes = []
+        if self.url_patterns:
             try:
                 import re
-                self._url_regex = re.compile(url_pattern)
-                logger.info(f"LinksFinder URL模式已设置: {url_pattern}")
+                for pattern in self.url_patterns:
+                    regex = re.compile(pattern)
+                    self._url_regexes.append(regex)
+                logger.info(f"LinksFinder URL模式已设置: {self.url_patterns}")
             except re.error as e:
-                logger.error(f"URL模式正则表达式无效: {url_pattern}, 错误: {e}")
-                self._url_regex = None
+                logger.error(f"URL模式正则表达式无效: {self.url_patterns}, 错误: {e}")
+                self._url_regexes = []
 
     def _get_domain_path(self, url: str) -> tuple[str, str]:
         """获取URL的域名和路径"""
@@ -669,11 +680,15 @@ class LinksFinder(PageProcessor):
 
     def _matches_url_pattern(self, url: str) -> bool:
         """检查URL是否匹配设定的模式"""
-        if not self._url_regex:
+        if not self._url_regexes:
             return True  # 如果没有设置模式，则匹配所有URL
         
         try:
-            return bool(self._url_regex.search(url))
+            # 检查是否匹配任何一个模式
+            for regex in self._url_regexes:
+                if regex.search(url):
+                    return True
+            return False  # 没有匹配任何模式
         except Exception as e:
             logger.warning(f"URL模式匹配错误: {e}")
             return True  # 出错时默认匹配
