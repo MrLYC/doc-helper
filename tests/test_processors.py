@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, Mock
 from collections import defaultdict
 
 from pdf_helper.processors import (
-    PageLoadProcessor, ContentExtractProcessor, PDFGenerateProcessor, PageMonitor, RequestMonitor
+    PageLoadProcessor, ContentExtractProcessor, PDFExporter, PageMonitor, RequestMonitor
 )
 from pdf_helper.protocol import URL, URLCollection, URLStatus, PageContext, ProcessorState
 
@@ -120,7 +120,7 @@ class TestProcessors:
         """测试处理器依赖关系"""
         loader = PageLoadProcessor("loader")
         extractor = ContentExtractProcessor("extractor")
-        pdf_gen = PDFGenerateProcessor("pdf_generator")
+        pdf_gen = PDFExporter("pdf_exporter", output_dir="/tmp")
         
         # 初始状态：只有loader就绪
         assert await loader.detect(mock_page_context) == ProcessorState.READY
@@ -132,9 +132,9 @@ class TestProcessors:
         # 验证loader的内部状态而不是ProcessorState
         assert loader._load_completed == True
         
-        # 现在extractor应该就绪
+        # 现在extractor和pdf_gen都应该就绪（PDFExporter被优化为可以在页面加载完成后就启动）
         assert await extractor.detect(mock_page_context) == ProcessorState.READY
-        assert await pdf_gen.detect(mock_page_context) == ProcessorState.WAITING
+        assert await pdf_gen.detect(mock_page_context) == ProcessorState.READY
         
         # 模拟内容提取
         mock_page_context.page.evaluate.side_effect = ["Test Content", "<body>Test Content</body>"]
@@ -144,18 +144,18 @@ class TestProcessors:
         # 验证extractor的内部状态
         assert extractor._content_extracted == True
         
-        # 现在pdf_gen应该就绪
+        # pdf_gen仍然就绪
         assert await pdf_gen.detect(mock_page_context) == ProcessorState.READY
         
         # 运行pdf_gen
         await pdf_gen.run(mock_page_context)
         # 验证pdf_gen的内部状态
-        assert pdf_gen._pdf_generated == True
+        assert pdf_gen._exported == True
         
         # 验证数据已正确保存到上下文
         assert "title" in mock_page_context.data
         assert "content" in mock_page_context.data
-        assert "pdf_generated" in mock_page_context.data
+        assert "pdf_exported" in mock_page_context.data
     
     @pytest.mark.asyncio
     async def test_page_monitor_initialization(self, mock_page_context):

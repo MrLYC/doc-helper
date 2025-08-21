@@ -620,5 +620,5 @@ def create_content_extractor() -> PageProcessor:
 
 def create_pdf_generator() -> PageProcessor:
     """创建PDF生成处理器"""
-    from .processors import PDFGenerateProcessor
-    return PDFGenerateProcessor("pdf_generator")
+    from .processors import PDFExporter
+    return PDFExporter("pdf_generator", output_dir="/tmp")

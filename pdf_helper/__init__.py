@@ -15,7 +15,7 @@ from .manager import ChromiumManager
 from .processors import (
     PageLoadProcessor,
     ContentExtractProcessor, 
-    PDFGenerateProcessor,
+    PDFExporter,
     PageMonitor,
     RequestMonitor,
     LinksFinder,
@@ -36,7 +36,7 @@ __all__ = [
     # 处理器类
     "PageLoadProcessor",
     "ContentExtractProcessor",
-    "PDFGenerateProcessor", 
+    "PDFExporter", 
     "PageMonitor",
     "RequestMonitor",
     "LinksFinder",

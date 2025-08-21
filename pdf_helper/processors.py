@@ -127,7 +127,7 @@ content_finder_elements_found = Counter(
     ['css_selector', 'found']
 )
 
-# PdfExporter 指标
+# PDFExporter 指标
 pdf_exporter_success_total = Counter(
     'pdf_exporter_success_total',
     'Total number of successful PDF exports',
@@ -142,7 +142,7 @@ pdf_exporter_failed_total = Counter(
 
 pdf_exporter_processing_time = Histogram(
     'pdf_exporter_processing_seconds',
-    'PdfExporter processing time',
+    'PDFExporter processing time',
     buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0]
 )
 
@@ -953,76 +953,6 @@ class ContentExtractProcessor(PageProcessor):
         logger.debug(f"内容提取处理器清理完成: {context.url.url}")
 
 
-class PDFGenerateProcessor(PageProcessor):
-    """PDF生成处理器，将页面转换为PDF"""
-
-    def __init__(self, name: str, output_dir: str = "/tmp", priority: int = 40):
-        """
-        初始化PDF生成处理器
-
-        Args:
-            name: 处理器名称
-            output_dir: 输出目录
-            priority: 优先级，默认为40（依赖内容提取）
-
-        """
-        super().__init__(name, priority)
-        self.output_dir = output_dir
-        self._pdf_generated = False
-
-    async def detect(self, context: PageContext) -> ProcessorState:
-        """检测是否可以生成PDF"""
-        if self._pdf_generated:
-            return ProcessorState.COMPLETED
-
-        # 依赖内容提取完成
-        if "content" not in context.data:
-            return ProcessorState.WAITING
-
-        # 检查是否有内容
-        if context.data.get("content_length", 0) > 0:
-            return ProcessorState.READY
-        logger.warning(f"页面无内容，跳过PDF生成: {context.url.url}")
-        return ProcessorState.CANCELLED
-
-    async def run(self, context: PageContext) -> None:
-        """执行PDF生成"""
-        try:
-            # 生成文件名
-            safe_url = context.url.url.replace("://", "_").replace("/", "_").replace("?", "_")
-            pdf_path = f"{self.output_dir}/{safe_url}_{context.url.id}.pdf"
-
-            # 生成PDF
-            await context.page.pdf(
-                path=pdf_path,
-                format="A4",
-                print_background=True,
-                margin={
-                    "top": "1cm",
-                    "right": "1cm",
-                    "bottom": "1cm",
-                    "left": "1cm",
-                },
-            )
-
-            # 保存PDF信息到上下文
-            context.data["pdf_path"] = pdf_path
-            context.data["pdf_generated"] = True
-
-            self._pdf_generated = True
-            # 注意：不要在这里设置状态，Manager会负责状态管理
-            logger.info(f"PDF生成完成: {context.url.url} -> {pdf_path}")
-
-        except Exception as e:
-            logger.error(f"PDF生成失败 {context.url.url}: {e}")
-            raise
-
-    async def finish(self, context: PageContext) -> None:
-        """清理PDF生成处理器"""
-        self._set_state(ProcessorState.FINISHED)
-        logger.debug(f"PDF生成处理器清理完成: {context.url.url}")
-
-
 class LinkExtractProcessor(PageProcessor):
     """链接提取处理器，提取页面中的链接"""
 
@@ -1516,35 +1446,65 @@ class ContentFinder(PageProcessor):
         self._set_state(ProcessorState.FINISHED)
 
 
-class PdfExporter(PageProcessor):
+class PDFExporter(PageProcessor):
     """
     PDF导出处理器
     
-    将页面导出为 PDF, 接受一个目标路径, 优先级 40
-    detect: 上下文中添加已处理核心内容的标记时启动
-    run: 将当前页面作为 PDF 输出到指定路径, 处理成功标记完成, 否则标记放弃
+    将页面导出为 PDF，支持多种触发条件和灵活的输出路径配置
     """
 
-    def __init__(self, output_path: str, priority: int = 40):
+    def __init__(self, name: str = None, output_path: str = None, output_dir: str = "/tmp", priority: int = 40):
         """
         初始化PDF导出处理器
         
         Args:
-            output_path: PDF输出路径
+            name: 处理器名称，如果不提供则自动生成
+            output_path: 完整的PDF输出路径，如果提供则忽略output_dir
+            output_dir: PDF输出目录，当output_path为None时使用
             priority: 处理器优先级，默认为40
         """
-        name = f"pdf_exporter_{uuid.uuid4().hex[:8]}"
+        if name is None:
+            name = f"pdf_exporter_{uuid.uuid4().hex[:8]}"
         super().__init__(name, priority)
+        
         self.output_path = output_path
+        self.output_dir = output_dir
         self._exported = False
         
-        logger.info(f"PdfExporter初始化: 输出路径='{output_path}', 优先级={priority}")
+        if output_path:
+            logger.info(f"PDFExporter初始化: 输出路径='{output_path}', 优先级={priority}")
+        else:
+            logger.info(f"PDFExporter初始化: 输出目录='{output_dir}', 优先级={priority}")
+
+    def _generate_pdf_path(self, context: PageContext) -> str:
+        """
+        生成PDF输出路径
+        
+        Args:
+            context: 页面上下文
+            
+        Returns:
+            str: 生成的PDF路径
+        """
+        if self.output_path:
+            return self.output_path
+        
+        # 生成安全的文件名
+        safe_url = context.url.url.replace("://", "_").replace("/", "_").replace("?", "_").replace(":", "_")
+        # 限制文件名长度，避免过长
+        if len(safe_url) > 100:
+            safe_url = safe_url[:100]
+        
+        return f"{self.output_dir}/{safe_url}_{context.url.id}.pdf"
 
     async def detect(self, context: PageContext) -> ProcessorState:
         """
         检测是否应该启动PDF导出
         
-        只有在上下文中有已处理核心内容标记时才启动
+        支持多种触发条件：
+        1. 有核心内容已处理标记时（优先）
+        2. 有内容提取完成时
+        3. 页面加载完成时（兜底）
         
         Args:
             context: 页面上下文
@@ -1555,9 +1515,19 @@ class PdfExporter(PageProcessor):
         if self._exported:
             return ProcessorState.COMPLETED
         
-        # 检查是否有核心内容已处理的标记
+        # 条件1: 检查是否有核心内容已处理的标记（ContentFinder完成后）
         if context.data.get("core_content_processed", False):
-            logger.info(f"PdfExporter检测到核心内容已处理，准备导出PDF: {context.url.url}")
+            logger.info(f"PDFExporter检测到核心内容已处理，准备导出PDF: {context.url.url}")
+            return ProcessorState.READY
+        
+        # 条件2: 检查是否有内容提取完成（ContentExtractProcessor完成后）
+        if "content" in context.data and context.data.get("content_length", 0) > 0:
+            logger.info(f"PDFExporter检测到内容提取完成，准备导出PDF: {context.url.url}")
+            return ProcessorState.READY
+        
+        # 条件3: 兜底条件 - 页面加载完成且有标题
+        if "title" in context.data and context.data.get("title"):
+            logger.info(f"PDFExporter检测到页面加载完成，准备导出PDF: {context.url.url}")
             return ProcessorState.READY
         
         return ProcessorState.WAITING
@@ -1576,17 +1546,24 @@ class PdfExporter(PageProcessor):
         
         page = context.page
         if not page:
-            logger.error(f"PdfExporter: 页面对象不存在，无法导出 PDF: {url_str}")
+            logger.error(f"PDFExporter: 页面对象不存在，无法导出 PDF: {url_str}")
             pdf_exporter_failed_total.labels(reason="no_page_object").inc()
             self._set_state(ProcessorState.CANCELLED)
             return
         
+        # 生成输出路径
+        pdf_path = self._generate_pdf_path(context)
+        
+        # 确保输出目录存在
+        import os
+        os.makedirs(os.path.dirname(pdf_path), exist_ok=True)
+        
         start_time = time.time()
         try:
-            logger.info(f"开始PDF导出: {url_str} -> {self.output_path}")
+            logger.info(f"开始PDF导出: {url_str} -> {pdf_path}")
             
             await page.pdf(
-                path=self.output_path,
+                path=pdf_path,
                 format="A4",
                 print_background=True,
                 margin={
@@ -1599,7 +1576,8 @@ class PdfExporter(PageProcessor):
             
             # 更新上下文数据
             context.data["pdf_exported"] = True
-            context.data["pdf_path"] = self.output_path
+            context.data["pdf_path"] = pdf_path
+            context.data["pdf_generated"] = True  # 保持向后兼容
             self._exported = True
             
             # 记录成功指标
@@ -1607,7 +1585,7 @@ class PdfExporter(PageProcessor):
             pdf_exporter_processing_time.observe(processing_time)
             pdf_exporter_success_total.labels(format="A4").inc()
             
-            logger.info(f"PdfExporter: PDF 导出成功 -> {self.output_path}")
+            logger.info(f"PDFExporter: PDF 导出成功 -> {pdf_path}")
             self._set_state(ProcessorState.COMPLETED)
             
         except Exception as e:
@@ -1616,7 +1594,7 @@ class PdfExporter(PageProcessor):
             pdf_exporter_processing_time.observe(processing_time)
             pdf_exporter_failed_total.labels(reason="pdf_generation_error").inc()
             
-            logger.error(f"PdfExporter: PDF 导出失败: {url_str}, 错误: {e}")
+            logger.error(f"PDFExporter: PDF 导出失败: {url_str}, 错误: {e}")
             self._set_state(ProcessorState.CANCELLED)
 
     async def finish(self, context: PageContext) -> None:
@@ -1630,13 +1608,18 @@ class PdfExporter(PageProcessor):
         url_str = current_url.url if current_url else "unknown"
         
         if self.state == ProcessorState.COMPLETED:
-            logger.info(f"PdfExporter: 完成导出 {url_str} -> {self.output_path}")
+            pdf_path = context.data.get("pdf_path", "unknown")
+            logger.info(f"PDFExporter: 完成导出 {url_str} -> {pdf_path}")
         elif self.state == ProcessorState.CANCELLED:
-            logger.warning(f"PdfExporter: 导出取消 {url_str}")
+            logger.warning(f"PDFExporter: 导出取消 {url_str}")
         else:
-            logger.info(f"PdfExporter处理器状态: {self.state.value}")
+            logger.info(f"PDFExporter处理器状态: {self.state.value}")
         
         # 清理临时数据
         self._exported = False
         
         self._set_state(ProcessorState.FINISHED)
+
+
+# 为了向后兼容，保留旧的类名作为别名
+PdfExporter = PDFExporter
