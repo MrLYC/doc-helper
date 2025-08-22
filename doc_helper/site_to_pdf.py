@@ -222,7 +222,7 @@ class TrueParallelProcessor:
         page_state = self.page_states[slot_index]
         if page_state and page_state.page:
             try:
-                if not page_state.is_closed():
+                if not page_state.page.is_closed():
                     # 添加超时机制，防止页面关闭时卡住
                     page_state.page.close()
                 logger.debug(f"🔄 槽位[{slot_index}] 页面已关闭: {page_state.url}")
@@ -2649,7 +2649,7 @@ def _execute_crawling_workflow(
 
     # 如果有失败的URL，根据设置选择重试方式
     if progress_state.failed_urls:
-        if args.auto_retry_failed:
+        if args.yes:
             # 自动重试模式：自动重试所有失败的URL 3次
             logger.info("启用自动重试模式，将重试所有失败的URL 3次")
             retry_pdf_files, retry_processed_urls = _auto_retry_failed_urls(
