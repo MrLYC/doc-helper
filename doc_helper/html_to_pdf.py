@@ -196,13 +196,15 @@ def convert_single(args):
 
 
 class HTMLConverter:
-    def __init__(self, output_pdf, max_workers=None, max_page=5000, landscape_mode=False):
+    def __init__(self, output_pdf, max_workers=None, max_page=5000, max_size=140*1024*1024, landscape_mode=False):
         self.output_pdf = output_pdf
         # 自动设置进程数为CPU核心数的75%
         self.max_workers = max_workers or max(1, int(cpu_count() * 0.75))
         logger.info(f"Using {self.max_workers} worker processes")
         self.max_page = max_page
         logger.info(f"Max pages per PDF: {self.max_page}")
+        self.max_size = max_size
+        logger.info(f"Max size per PDF: {self.max_size / (1024*1024):.1f} MB")
         self.landscape_mode = landscape_mode
         if landscape_mode:
             logger.info("Global landscape mode ENABLED")
@@ -281,45 +283,58 @@ class HTMLConverter:
         return len(self.temp_files), self.file_count - len(self.temp_files)
 
     def merge_pdfs(self):
-        """合并PDF文件，根据最大页数限制拆分输出"""
-        logger.info(f"Merging PDFs with max {self.max_page} pages per file")
+        """合并PDF文件，根据最大页数和文件大小限制拆分输出"""
+        logger.info(f"Merging PDFs with max {self.max_page} pages and {self.max_size / (1024*1024):.1f} MB per file")
 
         current_page_count = 0
+        current_size = 0
         part_num = 1
         merger = PdfMerger()
         base_output, ext = os.path.splitext(self.output_pdf)
 
         for pdf_file, num_pages in self.temp_files:
-            # 如果当前页数+新页数超过限制（且当前不是空文件），则结束当前批次
-            if current_page_count + num_pages > self.max_page and current_page_count > 0:
+            # 获取当前PDF文件大小
+            pdf_size = os.path.getsize(pdf_file)
+            
+            # 检查是否需要拆分（页数或文件大小超限，且当前不是空文件）
+            should_split = (
+                (current_page_count + num_pages > self.max_page or 
+                 current_size + pdf_size > self.max_size) and 
+                current_page_count > 0
+            )
+            
+            if should_split:
                 # 生成当前批次的输出文件名
                 part_name = f"{base_output}-{part_num}{ext}"
-                self.save_merger(merger, part_name)
+                self.save_merger(merger, part_name, current_size)
                 part_num += 1
 
                 # 重置
                 merger = PdfMerger()
                 current_page_count = 0
+                current_size = 0
                 logger.debug(f"Started new PDF part #{part_num}")
 
             # 添加当前PDF到合并器
             merger.append(pdf_file)
             current_page_count += num_pages
-            logger.debug(f"Added {pdf_file} ({num_pages} pages), total pages: {current_page_count}")
+            current_size += pdf_size
+            logger.debug(f"Added {pdf_file} ({num_pages} pages, {pdf_size / (1024*1024):.1f} MB), total: {current_page_count} pages, {current_size / (1024*1024):.1f} MB")
 
             # 如果单个文件超过限制，仍然单独成文件
-            if num_pages > self.max_page:
+            if num_pages > self.max_page or pdf_size > self.max_size:
                 part_name = f"{base_output}-{part_num}{ext}"
-                self.save_merger(merger, part_name)
+                self.save_merger(merger, part_name, current_size)
                 part_num += 1
                 merger = PdfMerger()
                 current_page_count = 0
+                current_size = 0
                 logger.debug(f"Single large PDF created (#{part_num-1}), resetting merger")
 
         # 处理最后一批次
         if current_page_count > 0:
             part_name = f"{base_output}-{part_num}{ext}"
-            self.save_merger(merger, part_name)
+            self.save_merger(merger, part_name, current_size)
         else:
             merger.close()  # 关闭未使用的merger
 
@@ -331,12 +346,22 @@ class HTMLConverter:
                 os.rename(output_file, self.output_pdf)
                 self.output_files = [self.output_pdf]
 
-    def save_merger(self, merger, output_file):
+    def save_merger(self, merger, output_file, expected_size=None):
         """保存当前的merger到文件并关闭"""
         try:
             with open(output_file, "wb") as f:
                 merger.write(f)
-            logger.info(f"Created PDF part: {output_file}")
+            
+            # 获取实际文件大小
+            actual_size = os.path.getsize(output_file)
+            size_mb = actual_size / (1024 * 1024)
+            
+            if expected_size:
+                expected_mb = expected_size / (1024 * 1024)
+                logger.info(f"Created PDF part: {output_file} ({size_mb:.1f} MB, estimated: {expected_mb:.1f} MB)")
+            else:
+                logger.info(f"Created PDF part: {output_file} ({size_mb:.1f} MB)")
+            
             self.output_files.append(output_file)
             return True
         except Exception:
@@ -391,7 +416,8 @@ if __name__ == "__main__":
         default=os.getenv("SENTRY_DSN"),
         help="Sentry DSN for error tracking (default: SENTRY_DSN env var)",
     )
-    parser.add_argument("--max-page", type=int, default=8000, help="Maximum pages per output PDF file")
+    parser.add_argument("--max-pdf-page", type=int, default=8000, help="Maximum pages per output PDF file")
+    parser.add_argument("--max-pdf-size", type=int, default=140, help="Maximum size per output PDF file (in MB)")
     parser.add_argument(
         "--landscape", action="store_true", help="Force landscape mode for all pages (useful for wide tables)"
     )
@@ -425,7 +451,10 @@ if __name__ == "__main__":
 
         # 添加事务跟踪
         with sentry_sdk.start_transaction(op="html_to_pdf", name="Convert HTML to PDF"):
-            with HTMLConverter(args.output_pdf, args.jobs, args.max_page, args.landscape) as converter:
+            # 将MB转换为字节
+            max_size_bytes = args.max_pdf_size * 1024 * 1024
+            
+            with HTMLConverter(args.output_pdf, args.jobs, args.max_pdf_page, max_size_bytes, args.landscape) as converter:
                 successful, failed = converter.process_directory(args.input_dir)
                 converter.print_summary()
                 if failed > 0:

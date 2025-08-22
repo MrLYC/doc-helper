@@ -2339,12 +2339,13 @@ def _interactive_retry_failed_urls(
 
 
 def _merge_pdfs(pdf_files, processed_urls, args):
-    """合并PDF文件"""
+    """合并PDF文件，根据最大页数和文件大小限制拆分输出"""
     if not pdf_files:
         logger.error("未生成任何PDF，请检查参数")
         return []
 
     logger.info(f"📄 准备合并 {len(pdf_files)} 个PDF文件")
+    logger.info(f"📋 限制条件: 最大 {args.max_pdf_pages} 页/文件, 最大 {args.max_pdf_size} MB/文件")
 
     base_path = Path(args.output_pdf)
     stem = base_path.stem
@@ -2355,6 +2356,8 @@ def _merge_pdfs(pdf_files, processed_urls, args):
 
     merger = PdfMerger()
     current_pages = 0
+    current_size = 0  # 当前累积的估计文件大小（字节）
+    max_size_bytes = args.max_pdf_size * 1024 * 1024  # 转换为字节
     file_index = 1
     merged_files = []
 
@@ -2367,26 +2370,45 @@ def _merge_pdfs(pdf_files, processed_urls, args):
                 logger.warning(f"PDF文件不存在: {pdf_file}")
                 continue
 
+            # 获取当前PDF文件的大小
+            file_size = pdf_file.stat().st_size
+
             with open(pdf_file, "rb") as f:
                 reader = PdfReader(f)
                 num_pages = len(reader.pages)
-                logger.debug(f"   文件页数: {num_pages}")
+                file_size_mb = file_size / (1024 * 1024)
+                logger.debug(f"   文件页数: {num_pages}, 文件大小: {file_size_mb:.2f} MB")
 
-                if current_pages > 0 and current_pages + num_pages > args.max_page:
+                # 检查是否需要拆分（页数或文件大小超限，且当前不是空文件）
+                should_split = (
+                    current_pages > 0 and 
+                    (current_pages + num_pages > args.max_pdf_pages or
+                     current_size + file_size > max_size_bytes)
+                )
+
+                if should_split:
                     output_name = f"{stem}.{file_index}{suffix}"
                     output_path = output_dir / output_name
 
-                    logger.info(f"📚 写入分卷 {output_path} (页数: {current_pages})")
+                    logger.info(f"📚 写入分卷 {output_path} (页数: {current_pages}, 大小: {current_size / (1024*1024):.2f} MB)")
                     with open(output_path, "wb") as out:
                         merger.write(out)
+                    
+                    # 记录实际输出文件大小
+                    actual_size = output_path.stat().st_size
+                    actual_size_mb = actual_size / (1024 * 1024)
+                    logger.info(f"   实际输出大小: {actual_size_mb:.2f} MB")
+                    
                     merged_files.append(str(output_path))
 
                     file_index += 1
                     merger = PdfMerger()
                     current_pages = 0
+                    current_size = 0
 
                 merger.append(str(pdf_file))
                 current_pages += num_pages
+                current_size += file_size
 
                 try:
                     pdf_file.unlink()
@@ -2397,6 +2419,7 @@ def _merge_pdfs(pdf_files, processed_urls, args):
         except Exception as e:
             logger.error(f"处理PDF文件失败 {pdf_file}: {e}")
 
+    # 写入最后一个文件
     if current_pages > 0:
         if file_index == 1:
             output_path = base_path
@@ -2404,13 +2427,21 @@ def _merge_pdfs(pdf_files, processed_urls, args):
             output_name = f"{stem}.{file_index}{suffix}"
             output_path = output_dir / output_name
 
-        logger.info(f"📚 写入最终PDF: {output_path} (页数: {current_pages})")
+        logger.info(f"📚 写入最终PDF: {output_path} (页数: {current_pages}, 估计大小: {current_size / (1024*1024):.2f} MB)")
         with open(output_path, "wb") as out:
             merger.write(out)
+        
+        # 记录实际输出文件大小
+        actual_size = output_path.stat().st_size
+        actual_size_mb = actual_size / (1024 * 1024)
+        logger.info(f"   实际输出大小: {actual_size_mb:.2f} MB")
+        
         merged_files.append(str(output_path))
 
     if merged_files:
+        total_size = sum(Path(f).stat().st_size for f in merged_files) / (1024 * 1024)
         logger.info(f"🎉 处理完成! 共处理 {len(processed_urls)} 个页面，生成 {len(merged_files)} 个PDF文件")
+        logger.info(f"📁 输出文件总大小: {total_size:.2f} MB")
         logger.info(f"📁 输出文件: {', '.join(merged_files)}")
     else:
         logger.error("没有PDF文件生成")
@@ -2451,7 +2482,8 @@ def _create_argument_parser():
     )
 
     # 基本配置参数
-    parser.add_argument("--max-page", type=int, default=10000, help="单PDF最大页数")
+    parser.add_argument("--max-pdf-pages", type=int, default=10000, help="单PDF最大页数")
+    parser.add_argument("--max-pdf-size", type=int, default=140, help="单PDF最大文件大小（MB）")
     parser.add_argument("--timeout", type=int, default=120, help="页面加载超时时间（秒）")
     parser.add_argument("--max-depth", type=int, default=10, help="最大爬取深度")
     parser.add_argument("--max-retries", type=int, default=3, help="失败重试次数")
