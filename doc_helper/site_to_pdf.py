@@ -468,17 +468,46 @@ def url_to_filename(url: str) -> str:
     return f"{safe_name}_{url_hash}.pdf"
 
 
+# 全局变量，用于信号处理器访问浏览器实例
+_global_browser = None
+_shutdown_requested = False
+
+
 def setup_signal_handlers(progress_state: ProgressState):
     """设置信号处理器，用于优雅退出"""
 
     def signal_handler(signum, frame):
+        global _shutdown_requested
+        if _shutdown_requested:
+            # 如果已经请求关闭，强制退出
+            logger.info("强制退出程序")
+            sys.exit(1)
+        
+        _shutdown_requested = True
         logger.info(f"收到信号 {signum}，正在保存进度...")
         progress_state.save_to_file()
-        logger.info("进度已保存，程序退出")
-        sys.exit(0)
+        logger.info("进度已保存")
+        
+        # 尝试关闭浏览器
+        global _global_browser
+        if _global_browser:
+            try:
+                logger.info("正在关闭浏览器...")
+                _global_browser.close()
+                _global_browser = None
+                logger.info("浏览器已关闭")
+            except Exception as e:
+                logger.warning(f"关闭浏览器时出错: {e}")
+        
+        logger.info("程序将在当前操作完成后退出")
 
     signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
     signal.signal(signal.SIGTERM, signal_handler)  # 终止信号
+
+
+def is_shutdown_requested():
+    """检查是否已请求关闭"""
+    return _shutdown_requested
 
 
 def create_progress_file_path(cache_dir: Path, base_url: str) -> str:
@@ -1533,6 +1562,11 @@ def _crawl_pages_serial(
         processed_count = len(progress_state.visited_urls)  # 已处理的URL数量
 
         while progress_state.queue:
+            # 检查是否请求关闭
+            if is_shutdown_requested():
+                logger.info("检测到关闭请求，退出处理循环")
+                break
+                
             url, depth = progress_state.queue.popleft()
             processed_count += 1
 
@@ -1917,6 +1951,11 @@ def _crawl_pages_parallel(
         processed_count = len(progress_state.visited_urls)
         
         while any(state is not None for state in processor.page_states) or progress_state.queue:
+            # 检查是否请求关闭
+            if is_shutdown_requested():
+                logger.info("检测到关闭请求，退出并行处理循环")
+                break
+                
             page_state = processor.page_states[current_slot]
             
             if page_state is None:
@@ -2604,6 +2643,11 @@ def _setup_browser_context(p, args):
             ]
         ),  # 在可视化模式下减少启动参数，避免影响显示
     )
+    
+    # 设置全局浏览器引用，用于信号处理器
+    global _global_browser
+    _global_browser = browser
+    
     context = browser.new_context(
         viewport={"width": 1366, "height": 768},
         ignore_https_errors=True,
@@ -2748,6 +2792,8 @@ def main():
             )
 
             logger.info("爬取完成，关闭浏览器...")
+            global _global_browser
+            _global_browser = None
             browser.close()
 
             # 显示域名失败统计
@@ -2755,22 +2801,30 @@ def main():
             if failure_summary != "无域名失败记录":
                 logger.info(f"\n📊 {failure_summary}")
 
-            # 合并PDF文件
-            _merge_pdfs(progress_state.pdf_files, progress_state.processed_urls, args)
+            # 检查是否因关闭请求而退出
+            if is_shutdown_requested():
+                logger.info("处理因用户中断而提前结束")
+            else:
+                # 合并PDF文件
+                _merge_pdfs(progress_state.pdf_files, progress_state.processed_urls, args)
 
-            # 成功完成后自动清理缓存目录
-            if use_cache:
-                cleanup_cache_directory(cache_dir)
+                # 成功完成后自动清理缓存目录
+                if use_cache:
+                    cleanup_cache_directory(cache_dir)
 
         except KeyboardInterrupt:
             logger.info("\n⚠️ 用户中断程序")
             logger.info(f"进度已保存到: {progress_state.progress_file}")
             logger.info(f"缓存目录: {cache_dir}")
             logger.info("下次运行时将自动继续（除非使用 --restart 参数重新开始）")
+            global _global_browser
+            _global_browser = None
             browser.close()
             return
         except Exception:
             logger.exception("程序执行过程中发生错误")
+            global _global_browser
+            _global_browser = None
             browser.close()
             raise
 
