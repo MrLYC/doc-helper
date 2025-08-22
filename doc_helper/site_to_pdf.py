@@ -2174,7 +2174,7 @@ def _get_retry_count(yes_mode=False):
             return 0
 
 
-def _retry_single_url(retry_page, url, args, base_url_normalized, timeout_config, url_blacklist_patterns, retry_count):
+def _retry_single_url(retry_page, url, args, base_url_normalized, timeout_config, url_blacklist_patterns, retry_count, temp_dir):
     """重试单个URL"""
     for attempt in range(retry_count):
         try:
@@ -2191,6 +2191,7 @@ def _retry_single_url(retry_page, url, args, base_url_normalized, timeout_config
                 args.verbose,
                 args.load_strategy,
                 url_blacklist_patterns,
+                temp_dir,  # 添加temp_dir参数
             )
 
             if pdf_path and pdf_path.exists():
@@ -2206,7 +2207,7 @@ def _retry_single_url(retry_page, url, args, base_url_normalized, timeout_config
 
 
 def _auto_retry_failed_urls(
-    context, failed_urls, args, base_url_normalized, timeout_config, url_blacklist_patterns, domain_failure_tracker
+    context, failed_urls, args, base_url_normalized, timeout_config, url_blacklist_patterns, domain_failure_tracker, temp_dir
 ):
     """自动重试失败的URL，无需用户交互"""
     if not failed_urls:
@@ -2234,6 +2235,7 @@ def _auto_retry_failed_urls(
                 timeout_config,
                 url_blacklist_patterns,
                 3,  # 固定重试3次
+                temp_dir,  # 添加temp_dir参数
             )
 
             if success:
@@ -2266,7 +2268,7 @@ def _auto_retry_failed_urls(
 
 
 def _interactive_retry_failed_urls(
-    context, failed_urls, args, base_url_normalized, timeout_config, url_blacklist_patterns, domain_failure_tracker
+    context, failed_urls, args, base_url_normalized, timeout_config, url_blacklist_patterns, domain_failure_tracker, temp_dir
 ):
     """交互式重试失败的URL"""
     if not failed_urls:
@@ -2307,6 +2309,7 @@ def _interactive_retry_failed_urls(
                 timeout_config,
                 url_blacklist_patterns,
                 retry_count,
+                temp_dir,  # 添加temp_dir参数
             )
 
             if success:
@@ -2692,6 +2695,7 @@ def _execute_crawling_workflow(
                 timeout_config,
                 url_blacklist_patterns,
                 domain_failure_tracker,
+                progress_state.temp_dir,  # 添加temp_dir参数
             )
         else:
             # 交互式重试模式：询问用户是否重试
@@ -2703,6 +2707,7 @@ def _execute_crawling_workflow(
                 timeout_config,
                 url_blacklist_patterns,
                 domain_failure_tracker,
+                progress_state.temp_dir,  # 添加temp_dir参数
             )
 
         # 合并重试成功的文件
