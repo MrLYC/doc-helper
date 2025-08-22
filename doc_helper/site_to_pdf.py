@@ -2116,26 +2116,29 @@ def _handle_page_result(
     else:
         logger.warning(f"❌ 页面未生成PDF: {url}")
 
-    # 处理新发现的链接
+    # 处理新发现的链接（只有在提供了url_pattern时才处理）
     new_links_count = 0
-    for link in links:
-        if not link:
-            continue
+    if url_pattern:  # 只有在提供了URL模式时才处理新链接
+        for link in links:
+            if not link:
+                continue
 
-        norm_url = normalize_url(link, base_url_normalized)
+            norm_url = normalize_url(link, base_url_normalized)
 
-        if not url_pattern.match(norm_url):
-            logger.debug(f"跳过不符合模式的URL: {norm_url}")
-            continue
+            if not url_pattern.match(norm_url):
+                logger.debug(f"跳过不符合模式的URL: {norm_url}")
+                continue
 
-        if norm_url in progress_state.visited_urls or norm_url in progress_state.enqueued:
-            logger.debug(f"已存在，跳过URL: {norm_url}")
-            continue
+            if norm_url in progress_state.visited_urls or norm_url in progress_state.enqueued:
+                logger.debug(f"已存在，跳过URL: {norm_url}")
+                continue
 
-        logger.info(f"🔗 添加新URL到队列: {norm_url} (深度: {depth+1})")
-        progress_state.queue.append((norm_url, depth + 1))
-        progress_state.enqueued.add(norm_url)
-        new_links_count += 1
+            logger.info(f"🔗 添加新URL到队列: {norm_url} (深度: {depth+1})")
+            progress_state.queue.append((norm_url, depth + 1))
+            progress_state.enqueued.add(norm_url)
+            new_links_count += 1
+    else:
+        logger.debug(f"重试模式：跳过链接发现，提取到的链接数: {len(links)}")
 
     if new_links_count > 0:
         logger.info(f"📊 从当前页面发现 {new_links_count} 个新链接，队列总数: {len(progress_state.queue)}")
@@ -2248,68 +2251,71 @@ def _retry_single_url(retry_page, url, args, base_url_normalized, timeout_config
 def _auto_retry_failed_urls(
     context, failed_urls, args, base_url_normalized, timeout_config, url_blacklist_patterns, domain_failure_tracker, temp_dir
 ):
-    """自动重试失败的URL，无需用户交互"""
+    """自动重试失败的URL，支持并行处理"""
     if not failed_urls:
         return [], []
 
     logger.info(f"开始自动重试 {len(failed_urls)} 个失败的URL，重试次数: 3")
 
-    # 自动重试时总是使用串行模式，避免复杂性
-    retry_page = context.new_page()
-    logger.info("为自动重试创建专用页面（串行模式）")
+    # 创建适当的进度状态用于重试
+    from collections import deque
+    
+    # 创建一个临时的重试进度状态，继承自ProgressState但不保存到文件
+    class RetryProgressState(ProgressState):
+        def __init__(self, temp_dir, failed_urls):
+            self.base_url = ""
+            self.output_pdf = ""
+            self.temp_dir = temp_dir
+            self.progress_file = ""  # 重试时不保存进度文件
+            self.visited_urls = set()
+            self.failed_urls = []
+            self.processed_urls = []
+            self.pdf_files = []
+            self.queue = deque([(url, 0) for url, _ in failed_urls])  # 重试时深度设为0
+            self.enqueued = set([url for url, _ in failed_urls])
+        
+        def save_to_file(self):
+            # 重试时不需要保存进度文件
+            pass
+    
+    retry_progress_state = RetryProgressState(temp_dir, failed_urls)
 
-    try:
-        retry_pdf_files = []
-        retry_processed_urls = []
-        still_failed_urls = []
+    logger.info(f"重试模式：{'并行' if args.parallel_pages > 1 else '串行'}处理，并行度: {args.parallel_pages}")
 
-        for i, (url, reason) in enumerate(failed_urls, 1):
-            logger.info(f"🔄 自动重试进度: [{i}/{len(failed_urls)}] 处理: {url}")
+    # 使用相同的爬取逻辑，但只重试失败的URL
+    if args.parallel_pages > 1:
+        # 使用并行处理重试
+        retry_progress_state = _crawl_pages_parallel(
+            context,
+            args,
+            base_url_normalized,
+            None,  # 不使用url_pattern，重试所有失败的URL
+            url_blacklist_patterns,
+            timeout_config,
+            retry_progress_state,
+            domain_failure_tracker,
+        )
+    else:
+        # 使用串行处理重试
+        retry_progress_state = _crawl_pages_serial(
+            context,
+            args,
+            base_url_normalized,
+            None,  # 不使用url_pattern，重试所有失败的URL
+            url_blacklist_patterns,
+            timeout_config,
+            retry_progress_state,
+            domain_failure_tracker,
+        )
 
-            pdf_path, processed_url, success = _retry_single_url(
-                retry_page,
-                url,
-                args,
-                base_url_normalized,
-                timeout_config,
-                url_blacklist_patterns,
-                3,  # 固定重试3次
-                temp_dir,  # 添加temp_dir参数
-            )
-
-            if success:
-                retry_pdf_files.append(pdf_path)
-                retry_processed_urls.append(processed_url)
-            else:
-                still_failed_urls.append((url, "自动重试后仍然失败"))
-
-    finally:
-        # 确保重试页面被正确关闭
-        try:
-            retry_page.close()
-            logger.info("已关闭自动重试专用页面")
-        except Exception as close_err:
-            logger.warning(f"关闭自动重试页面时出错: {close_err!s}")
-
-    # 重试结果统计
-    retry_success_count = len(retry_processed_urls)
-    retry_failed_count = len(still_failed_urls)
-    logger.info("\n📊 自动重试结果统计:")
-    logger.info(f"   重试成功: {retry_success_count} 个")
-    logger.info(f"   重试后仍失败: {retry_failed_count} 个")
-
-    if still_failed_urls:
-        logger.warning(f"仍有 {len(still_failed_urls)} 个URL自动重试后依然失败:")
-        for url, reason in still_failed_urls:
-            logger.warning(f"  - {url}: {reason}")
-
-    return retry_pdf_files, retry_processed_urls
+    logger.info(f"自动重试完成：成功 {len(retry_progress_state.pdf_files)} 个，失败 {len(retry_progress_state.failed_urls)} 个")
+    return retry_progress_state.pdf_files, retry_progress_state.processed_urls
 
 
 def _interactive_retry_failed_urls(
     context, failed_urls, args, base_url_normalized, timeout_config, url_blacklist_patterns, domain_failure_tracker, temp_dir
 ):
-    """交互式重试失败的URL"""
+    """交互式重试失败的URL，支持并行处理"""
     if not failed_urls:
         return [], []
 
@@ -2328,56 +2334,59 @@ def _interactive_retry_failed_urls(
 
     logger.info(f"开始交互式重试 {len(urls_to_retry)} 个失败的URL，重试次数: {retry_count}")
 
-    # 重试时总是使用串行模式，避免复杂性
-    retry_page = context.new_page()
-    logger.info("为交互式重试创建专用页面（串行模式）")
+    # 创建适当的进度状态用于重试
+    from collections import deque
+    
+    # 创建一个临时的重试进度状态，继承自ProgressState但不保存到文件
+    class RetryProgressState(ProgressState):
+        def __init__(self, temp_dir, urls_to_retry):
+            self.base_url = ""
+            self.output_pdf = ""
+            self.temp_dir = temp_dir
+            self.progress_file = ""  # 重试时不保存进度文件
+            self.visited_urls = set()
+            self.failed_urls = []
+            self.processed_urls = []
+            self.pdf_files = []
+            self.queue = deque([(url, 0) for url in urls_to_retry])  # 重试时深度设为0
+            self.enqueued = set(urls_to_retry)
+        
+        def save_to_file(self):
+            # 重试时不需要保存进度文件
+            pass
+    
+    retry_progress_state = RetryProgressState(temp_dir, urls_to_retry)
 
-    try:
-        retry_pdf_files = []
-        retry_processed_urls = []
-        still_failed_urls = []
+    logger.info(f"重试模式：{'并行' if args.parallel_pages > 1 else '串行'}处理，并行度: {args.parallel_pages}")
 
-        for i, url in enumerate(urls_to_retry, 1):
-            logger.info(f"🔄 交互式重试进度: [{i}/{len(urls_to_retry)}] 处理: {url}")
+    # 使用相同的爬取逻辑，但只重试选择的URL
+    if args.parallel_pages > 1:
+        # 使用并行处理重试
+        retry_progress_state = _crawl_pages_parallel(
+            context,
+            args,
+            base_url_normalized,
+            None,  # 不使用url_pattern，重试所有选择的URL
+            url_blacklist_patterns,
+            timeout_config,
+            retry_progress_state,
+            domain_failure_tracker,
+        )
+    else:
+        # 使用串行处理重试
+        retry_progress_state = _crawl_pages_serial(
+            context,
+            args,
+            base_url_normalized,
+            None,  # 不使用url_pattern，重试所有选择的URL
+            url_blacklist_patterns,
+            timeout_config,
+            retry_progress_state,
+            domain_failure_tracker,
+        )
 
-            pdf_path, processed_url, success = _retry_single_url(
-                retry_page,
-                url,
-                args,
-                base_url_normalized,
-                timeout_config,
-                url_blacklist_patterns,
-                retry_count,
-                temp_dir,  # 添加temp_dir参数
-            )
-
-            if success:
-                retry_pdf_files.append(pdf_path)
-                retry_processed_urls.append(processed_url)
-            else:
-                still_failed_urls.append((url, "交互式重试后仍然失败"))
-
-    finally:
-        # 确保重试页面被正确关闭
-        try:
-            retry_page.close()
-            logger.info("已关闭交互式重试专用页面")
-        except Exception as close_err:
-            logger.warning(f"关闭交互式重试页面时出错: {close_err!s}")
-
-    # 重试结果统计
-    retry_success_count = len(retry_processed_urls)
-    retry_failed_count = len(still_failed_urls)
-    logger.info("\n📊 交互式重试结果统计:")
-    logger.info(f"   重试成功: {retry_success_count} 个")
-    logger.info(f"   重试后仍失败: {retry_failed_count} 个")
-
-    if still_failed_urls:
-        logger.warning(f"仍有 {len(still_failed_urls)} 个URL交互式重试后依然失败:")
-        for url, reason in still_failed_urls:
-            logger.warning(f"  - {url}: {reason}")
-
-    return retry_pdf_files, retry_processed_urls
+    logger.info(f"交互式重试完成：成功 {len(retry_progress_state.pdf_files)} 个，失败 {len(retry_progress_state.failed_urls)} 个")
+    return retry_progress_state.pdf_files, retry_progress_state.processed_urls
 
 
 def _merge_pdfs(pdf_files, processed_urls, args):
@@ -2757,6 +2766,15 @@ def _execute_crawling_workflow(
         # 合并重试成功的文件
         progress_state.pdf_files.extend(retry_pdf_files)
         progress_state.processed_urls.extend(retry_processed_urls)
+        
+        # 从失败队列中移除重试成功的URL
+        if retry_processed_urls:
+            retry_success_urls = set(retry_processed_urls)
+            progress_state.failed_urls = [
+                (url, reason) for url, reason in progress_state.failed_urls 
+                if url not in retry_success_urls
+            ]
+            logger.info(f"从失败队列中移除了 {len(retry_processed_urls)} 个重试成功的URL")
 
     return progress_state
 
@@ -2791,8 +2809,11 @@ def main():
                 domain_failure_tracker,
             )
 
+            # 保存最终的进度状态（包括重试后的更新）
+            progress_state.save_to_file()
+            logger.info(f"进度状态已保存到: {progress_state.progress_file}")
+
             logger.info("爬取完成，关闭浏览器...")
-            global _global_browser
             _global_browser = None
             browser.close()
 
@@ -2817,13 +2838,11 @@ def main():
             logger.info(f"进度已保存到: {progress_state.progress_file}")
             logger.info(f"缓存目录: {cache_dir}")
             logger.info("下次运行时将自动继续（除非使用 --restart 参数重新开始）")
-            global _global_browser
             _global_browser = None
             browser.close()
             return
         except Exception:
             logger.exception("程序执行过程中发生错误")
-            global _global_browser
             _global_browser = None
             browser.close()
             raise
