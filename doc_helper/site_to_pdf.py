@@ -1519,6 +1519,13 @@ def _crawl_pages_with_progress(
         os.makedirs(progress_state.temp_dir, exist_ok=True)
         logger.info(f"使用缓存目录: {progress_state.temp_dir}")
 
+    # 如果是新的爬取任务且队列中包含base_url，先对base_url进行特殊的预检查
+    if progress_state.queue and len(progress_state.visited_urls) == 0:
+        first_url, first_depth = progress_state.queue[0]
+        if first_url == base_url_normalized:
+            logger.info("🔍 对起始URL进行预连接检查...")
+            _perform_base_url_precheck(context, base_url_normalized, args, timeout_config, url_blacklist_patterns)
+
     # 根据并行页面数量选择处理方式
     if args.parallel_pages > 1:
         return _crawl_pages_parallel(
@@ -1541,6 +1548,68 @@ def _crawl_pages_with_progress(
         progress_state,
         domain_failure_tracker,
     )
+
+
+def _perform_base_url_precheck(context, base_url, args, timeout_config, url_blacklist_patterns):
+    """
+    对起始URL进行预连接检查，确保网站可访问
+    
+    Args:
+        context: 浏览器上下文
+        base_url: 起始URL
+        args: 命令行参数
+        timeout_config: 超时配置
+        url_blacklist_patterns: URL黑名单模式
+    """
+    logger.info(f"🔍 检查起始URL连接性: {base_url}")
+    
+    # 创建临时页面进行预检查
+    page = context.new_page()
+    
+    try:
+        # 设置请求拦截
+        _setup_request_blocking(page, url_blacklist_patterns)
+        
+        # 进行更激进的重试，确保base_url可以访问
+        max_precheck_retries = max(args.max_retries * 2, 5)  # 至少5次重试
+        
+        for attempt in range(max_precheck_retries):
+            try:
+                logger.info(f"📞 第 {attempt + 1}/{max_precheck_retries} 次预连接尝试...")
+                
+                # 使用较长的超时时间进行预检查
+                extended_timeout = timeout_config.initial_load_timeout * 2
+                page.goto(base_url, wait_until="domcontentloaded", timeout=extended_timeout)
+                
+                # 检查页面是否正常加载
+                if page.url:
+                    logger.info(f"✅ 起始URL预连接成功: {page.url}")
+                    return  # 成功，提前退出
+                    
+            except PlaywrightTimeoutError as e:
+                wait_time = min(2 ** attempt, 30)  # 指数退避，最大30秒
+                if attempt < max_precheck_retries - 1:
+                    logger.warning(f"⏱️ 预连接超时，{wait_time}秒后重试: {e}")
+                    time.sleep(wait_time)
+                else:
+                    logger.warning(f"⚠️ 预连接最终失败，但将继续尝试正常处理: {e}")
+                    
+            except Exception as e:
+                wait_time = min(2 ** attempt, 30)
+                if attempt < max_precheck_retries - 1:
+                    logger.warning(f"🔄 预连接遇到问题，{wait_time}秒后重试: {e}")
+                    time.sleep(wait_time)
+                else:
+                    logger.warning(f"⚠️ 预连接遇到问题，但将继续尝试正常处理: {e}")
+                    
+        logger.info("🔄 预连接阶段完成，继续正常爬取流程")
+        
+    finally:
+        # 确保临时页面被关闭
+        try:
+            page.close()
+        except Exception as e:
+            logger.debug(f"关闭预检查页面时出错: {e}")
 
 
 def _crawl_pages_serial(
