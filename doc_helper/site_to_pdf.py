@@ -159,7 +159,7 @@ class TrueParallelProcessor:
 
             # 首先等待页面加载
             try:
-                page.wait_for_load_state("load", timeout=timeout_config.base_timeout * 1000)
+                page.wait_for_load_state("networkidle", timeout=timeout_config.base_timeout * 1000)
                 logger.info("网络已达到空闲状态")
             except PlaywrightTimeoutError:
                 logger.warning("页面加载等待超时，继续等待元素可见")
@@ -2508,7 +2508,7 @@ def _merge_pdfs(pdf_files, processed_urls, args):
                 )
 
                 if should_split:
-                    output_name = f"{stem}.{file_index}{suffix}"
+                    output_name = f"{stem}-{file_index}{suffix}"
                     output_path = output_dir / output_name
 
                     logger.info(f"📚 写入分卷 {output_path} (页数: {current_pages}, 大小: {current_size / (1024*1024):.2f} MB)")
@@ -2872,12 +2872,16 @@ def _check_output_files_exist(output_pdf_path: str) -> bool:
     suffix = output_path.suffix
     parent_dir = output_path.parent
 
-    # 检查前10个可能的拆分文件
-    for i in range(1, 11):
-        split_file = parent_dir / f"{stem}-{i}{suffix}"
-        if split_file.exists():
-            logger.info(f"发现拆分文件: {split_file}")
-            return True
+    # 检查可能的拆分文件
+    split_file = parent_dir / f"{stem}-{1}{suffix}"
+    if split_file.exists():
+        logger.info(f"发现拆分文件: {split_file}")
+        return True
+
+    split_file = parent_dir / f"{stem}.{1}{suffix}"
+    if split_file.exists():
+        logger.info(f"发现拆分文件: {split_file}")
+        return True
 
     return False
 
