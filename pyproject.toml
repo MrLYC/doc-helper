@@ -73,7 +73,7 @@ optional = true
 
 [tool.poetry.group.dev.dependencies]
 mypy = "^1.17.1"
-ruff = "^0.12.10"
+ruff = "^0.12.11"
 pytest = "^8.4.1"
 pytest-cov = "^6.2.1"
 tox = "^4.28.4"
