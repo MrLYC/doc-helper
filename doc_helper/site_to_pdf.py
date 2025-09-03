@@ -118,7 +118,7 @@ class TrueParallelProcessor:
 
             # 设置请求拦截和监控（页面已经通过goto预加载过了）
             _setup_request_blocking(page_state.page, url_blacklist_patterns)
-            _setup_slow_request_monitoring(page_state.page, timeout_config)
+            slow_requests = _setup_slow_request_monitoring(page_state.page, timeout_config)
 
             # 根据加载策略直接等待元素，不重新加载页面
             success = self._apply_parallel_load_strategy(
@@ -126,6 +126,8 @@ class TrueParallelProcessor:
                 args.content_selector,
                 timeout_config,
                 args.load_strategy,
+                page_state.url,
+                slow_requests,
             )
 
             if success:
@@ -144,7 +146,7 @@ class TrueParallelProcessor:
             logger.warning(f"❌ 槽位[{slot_index}] 加载失败: {page_state.url} - {e!s}")
             return False
 
-    def _apply_parallel_load_strategy(self, page, content_selector, timeout_config, load_strategy):
+    def _apply_parallel_load_strategy(self, page, content_selector, timeout_config, load_strategy, url, slow_requests):
         """在并行模式下应用加载策略，页面已经预加载过"""
         logger.info(f"应用{load_strategy}加载策略（并行模式，页面已预加载）")
 
@@ -157,24 +159,39 @@ class TrueParallelProcessor:
             # Thorough模式：等待页面加载后再检查元素
             logger.info("彻底加载模式：等待完全的页面加载，然后持续等待元素可见")
 
-            # 首先等待页面加载
+            # 使用 _perform_single_load_attempt 但跳过 goto，因为页面已预加载
             try:
-                page.wait_for_load_state("networkidle", timeout=timeout_config.base_timeout * 1000)
-                logger.info("网络已达到空闲状态")
-            except PlaywrightTimeoutError:
-                logger.warning("页面加载等待超时，继续等待元素可见")
-                # 在thorough模式下，记录还在加载的慢请求（如果有的话）
-                # 注意：并行模式下我们不维护slow_requests，所以跳过这个日志
+                result = _perform_single_load_attempt(
+                    page, url, content_selector, timeout_config, load_strategy, 
+                    False, slow_requests, 0, 1, skip_goto=True
+                )
+                return result is not None
+            except Exception as e:
+                logger.warning(f"彻底加载策略失败: {e}")
+                return False
 
-            # 然后等待元素可见（使用剩余时间）
-            remaining_timeout = max(timeout_config.base_timeout // 2, timeout_config.thorough_min_timeout)
-            timeout_config_remaining = TimeoutConfig(remaining_timeout)
-            return wait_for_element_visible(page, content_selector, timeout_config_remaining, "thorough")
-
-        # normal模式
-        # Normal模式：直接等待元素可见
-        logger.info("正常加载模式：直接等待元素可见")
+        # Normal模式：智能等待
+        logger.info("普通加载模式：智能等待元素可见")
         return wait_for_element_visible(page, content_selector, timeout_config, "normal")
+
+    def _wait_for_parallel_page_complete(self, page_state, content_selector, timeout_config, load_strategy, verbose_mode):
+        """等待并行页面完成加载"""
+        try:
+            page = page_state.page
+            slow_requests = _setup_slow_request_monitoring(page, timeout_config)
+            
+            # 使用修改后的并行加载策略
+            if self._apply_parallel_load_strategy(page, content_selector, timeout_config, load_strategy, page_state.url, slow_requests):
+                page_state.is_loaded = True
+                page_state.is_loading = False
+                page_state.final_url = page.url
+                return True
+            else:
+                return False
+        except Exception as e:
+            logger.error(f"等待页面完成失败 {page_state.url}: {e}")
+            page_state.load_error = str(e)
+            return False
 
     def _process_page_content(self, slot_index: int, args, base_url_normalized, timeout_config, progress_state):
         """处理页面内容并生成PDF"""
@@ -900,7 +917,7 @@ def _apply_load_strategy(page, content_selector, timeout_config, load_strategy, 
 
 
 def _perform_single_load_attempt(
-    page, url, content_selector, timeout_config, load_strategy, verbose_mode, slow_requests, attempt, max_retries,
+    page, url, content_selector, timeout_config, load_strategy, verbose_mode, slow_requests, attempt, max_retries, skip_goto=False,
 ):
     """执行单次页面加载尝试"""
     logger.info(f"尝试加载页面 ({attempt+1}/{max_retries}): {url}")
@@ -908,9 +925,13 @@ def _perform_single_load_attempt(
     if verbose_mode:
         logger.info("可视化模式：等待页面基本加载...")
 
-    # 先尝试快速加载到 domcontentloaded 状态
-    page.goto(url, wait_until="domcontentloaded", timeout=timeout_config.initial_load_timeout)
-    logger.info("页面DOM已加载完成")
+    # 只有在非跳过模式下才执行 goto
+    if not skip_goto:
+        # 先尝试快速加载到 domcontentloaded 状态
+        page.goto(url, wait_until="domcontentloaded", timeout=timeout_config.initial_load_timeout)
+        logger.info("页面DOM已加载完成")
+    else:
+        logger.info("跳过页面加载（页面已预加载）")
 
     if verbose_mode:
         # 在页面标题中显示处理状态
@@ -966,6 +987,7 @@ def _handle_page_loading_with_retries(
                 slow_requests,
                 attempt,
                 max_retries,
+                skip_goto=False,  # 默认不跳过页面加载
             )
 
             if result:
