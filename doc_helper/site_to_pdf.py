@@ -2613,6 +2613,7 @@ def _create_argument_parser():
     parser.add_argument("-d", "--debug", action="store_true", help="启用调试模式，保存页面截图")
     parser.add_argument("--debug-dir", default="debug_screenshots", help="调试截图保存目录")
     parser.add_argument("-v", "--verbose", action="store_true", help="显示浏览器界面，便于观察处理过程")
+    parser.add_argument("-s", "--system-profile", action="store_true", help="使用系统浏览器的用户配置文件，保持登录状态和cookies")
     parser.add_argument("-y", "--yes", action="store_true", help="无人值守模式，所有需要用户输入的地方都使用默认值")
 
     # 加载策略参数
@@ -2705,7 +2706,76 @@ def _setup_browser_context(p, args):
         logger.info("启用可视化模式 - 浏览器界面将显示处理过程")
     else:
         logger.info("使用无头模式 - 浏览器在后台运行")
-
+    
+    # 如果使用系统配置文件
+    if args.system_profile:
+        logger.info("使用系统浏览器配置文件 - 将保持登录状态和cookies")
+        
+        # 获取系统默认Chrome配置文件路径
+        import platform
+        import os
+        
+        system = platform.system()
+        if system == "Darwin":  # macOS
+            user_data_dir = os.path.expanduser("~/Library/Application Support/Google/Chrome")
+        elif system == "Linux":
+            user_data_dir = os.path.expanduser("~/.config/google-chrome")
+        elif system == "Windows":
+            user_data_dir = os.path.expanduser("~/AppData/Local/Google/Chrome/User Data")
+        else:
+            logger.warning(f"未知系统类型: {system}，尝试使用默认路径")
+            user_data_dir = os.path.expanduser("~/.config/google-chrome")
+        
+        # 检查配置文件目录是否存在
+        if not os.path.exists(user_data_dir):
+            logger.warning(f"系统Chrome配置文件目录不存在: {user_data_dir}")
+            logger.warning("将使用临时配置文件，无法保持登录状态")
+            user_data_dir = None
+        else:
+            logger.info(f"使用Chrome配置文件: {user_data_dir}")
+        
+        # 使用persistent context以复用用户数据
+        if user_data_dir:
+            try:
+                context = p.chromium.launch_persistent_context(
+                    user_data_dir=user_data_dir,
+                    headless=headless_mode,
+                    viewport={"width": 1366, "height": 768},
+                    ignore_https_errors=True,
+                    java_script_enabled=True,
+                    bypass_csp=True,
+                    args=(
+                        [
+                            "--disable-gpu",
+                            "--disable-dev-shm-usage",
+                            "--disable-setuid-sandbox",
+                            "--no-sandbox",
+                            "--disable-blink-features=AutomationControlled",
+                        ]
+                        if headless_mode
+                        else [
+                            "--disable-blink-features=AutomationControlled",
+                        ]
+                    ),
+                )
+                
+                # 设置超时
+                context.set_default_timeout(args.timeout * 1000)
+                
+                # 对于persistent context，browser就是context
+                browser = context
+                
+                # 设置全局浏览器引用，用于信号处理器
+                global _global_browser
+                _global_browser = browser
+                
+                logger.info("成功启动带有系统配置文件的浏览器")
+                return browser, context
+            except Exception as e:
+                logger.error(f"启动带有系统配置文件的浏览器失败: {e}")
+                logger.info("将回退到默认模式")
+    
+    # 默认模式（无系统配置文件）
     browser = p.chromium.launch(
         headless=headless_mode,
         args=(
