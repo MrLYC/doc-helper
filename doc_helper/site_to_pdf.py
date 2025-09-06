@@ -1459,9 +1459,11 @@ def compile_blacklist_patterns(blacklist_args):
     return patterns
 
 
-def _initialize_or_resume_progress(base_url_normalized, output_file, max_depth, cache_dir, use_cache=True):
+def _initialize_or_resume_progress(base_urls_normalized, output_file, max_depth, cache_dir, use_cache=True):
     """初始化新的进度状态或从文件恢复进度状态"""
-    progress_file_path = create_progress_file_path(cache_dir, base_url_normalized)
+    # 使用第一个URL作为主要URL来创建进度文件路径
+    primary_url = base_urls_normalized[0] if base_urls_normalized else ""
+    progress_file_path = create_progress_file_path(cache_dir, primary_url)
     progress_file = Path(progress_file_path)
 
     if use_cache and progress_file.exists():
@@ -1481,7 +1483,7 @@ def _initialize_or_resume_progress(base_url_normalized, output_file, max_depth, 
 
     # 创建新的进度状态
     progress_state = ProgressState(
-        base_url=base_url_normalized,
+        base_url=primary_url,  # 使用主要URL
         output_pdf=output_file,
         temp_dir=str(cache_dir),  # 使用缓存目录作为临时目录
         progress_file=str(progress_file),
@@ -1493,9 +1495,10 @@ def _initialize_or_resume_progress(base_url_normalized, output_file, max_depth, 
         enqueued=set(),
     )
 
-    # 初始化队列
-    progress_state.queue.append((base_url_normalized, 0))
-    progress_state.enqueued.add(base_url_normalized)
+    # 将所有基础URL添加到队列中
+    for url in base_urls_normalized:
+        progress_state.queue.append((url, 0))
+        progress_state.enqueued.add(url)
 
     logger.info("创建新的进度状态")
     return progress_state, False
@@ -2575,7 +2578,7 @@ def _create_argument_parser():
     parser = argparse.ArgumentParser(description="Webpage to PDF converter")
 
     # 必填参数 - 添加短参数
-    parser.add_argument("-u", "--base-url", required=True, help="起始URL")
+    parser.add_argument("-u", "--base-url", nargs="+", required=True, help="起始URL，可以指定多个")
     parser.add_argument("-c", "--content-selector", required=True, help="内容容器选择器")
     parser.add_argument("-t", "--toc-selector", action="append", required=True, help="链接提取选择器，可指定多个")
     parser.add_argument("-o", "--output-pdf", required=True, help="输出PDF路径")
@@ -2647,7 +2650,8 @@ def _create_argument_parser():
 
 def _handle_cleanup_command(args):
     """处理清理命令"""
-    base_url_normalized = normalize_url(args.base_url)
+    # 处理第一个URL作为主要的base_url用于缓存ID计算
+    base_url_normalized = normalize_url(args.base_url[0])
     cache_id = calculate_cache_id(
         base_url_normalized,
         args.content_selector,
@@ -2670,8 +2674,11 @@ def _initialize_configuration(args):
         f"初始加载: {timeout_config.initial_load_timeout}ms, 页面渲染: {timeout_config.page_render_wait}s",
     )
 
-    base_url_normalized = normalize_url(args.base_url, args.base_url)
-    logger.info(f"标准化基准URL: {base_url_normalized}")
+    # 处理多个base_url
+    base_urls_normalized = [normalize_url(url, url) for url in args.base_url]
+    base_url_normalized = base_urls_normalized[0]  # 主要的base_url（用于向后兼容）
+    logger.info(f"标准化基准URL: {base_urls_normalized}")
+    logger.info(f"主要基准URL（向后兼容）: {base_url_normalized}")
 
     # 创建域名失败跟踪器
     domain_failure_tracker = DomainFailureTracker(
@@ -2762,7 +2769,7 @@ def _setup_cache_and_progress(args, base_url_normalized):
 
     # 初始化或恢复进度状态
     progress_state, is_resumed = _initialize_or_resume_progress(
-        base_url_normalized,
+        base_urls_normalized,
         args.output_pdf,
         args.max_depth,
         cache_dir,
