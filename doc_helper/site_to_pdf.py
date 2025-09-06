@@ -2702,7 +2702,7 @@ def _initialize_configuration(args):
         url_pattern = re.compile(default_pattern)
         logger.info(f"使用默认URL匹配模式（基于父目录）: {url_pattern.pattern}")
 
-    return timeout_config, base_url_normalized, base_urls_normalized, url_blacklist_patterns, url_pattern, domain_failure_tracker
+    return timeout_config, base_url_normalized, url_blacklist_patterns, url_pattern, domain_failure_tracker
 
 
 def _setup_browser_context(p, args):
@@ -2745,12 +2745,10 @@ def _setup_browser_context(p, args):
     return browser, context
 
 
-def _setup_cache_and_progress(args, base_urls_normalized):
+def _setup_cache_and_progress(args, base_url_normalized):
     """设置缓存和进度状态"""
-    # 使用第一个URL来计算缓存ID
-    primary_url = base_urls_normalized[0] if base_urls_normalized else ""
     cache_id = calculate_cache_id(
-        primary_url,
+        base_url_normalized,
         args.content_selector,
         args.toc_selector,
         args.max_depth,
@@ -2914,13 +2912,13 @@ def main():
             logger.info("检测到 --restart 参数，将覆盖现有输出文件")
 
     # 初始化配置
-    timeout_config, base_url_normalized, base_urls_normalized, url_blacklist_patterns, url_pattern, domain_failure_tracker = (
+    timeout_config, base_url_normalized, url_blacklist_patterns, url_pattern, domain_failure_tracker = (
         _initialize_configuration(args)
     )
 
     with sync_playwright() as p:
         browser, context = _setup_browser_context(p, args)
-        cache_dir, use_cache, progress_state = _setup_cache_and_progress(args, base_urls_normalized)
+        cache_dir, use_cache, progress_state = _setup_cache_and_progress(args, base_url_normalized)
 
         try:
             progress_state = _execute_crawling_workflow(
