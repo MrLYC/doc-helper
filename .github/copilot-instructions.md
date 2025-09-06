@@ -21,10 +21,39 @@ Doc Helper 是一个基于 Python 的网页文档转PDF爬虫工具。项目使�
 - 代码需要保证可读性和可维护性，有合理的日志打印，圈复杂度不应该超过 10
 
 ### 依赖管理
-- 使用 Poetry 管理所有依赖
-- 执行命令时必须使用 `poetry run` 前缀
+- **严格使用 Poetry 管理所有依赖** - 这是项目的核心规范
+- **所有Python命令执行必须使用 `poetry run` 前缀**
 - 添加新依赖使用 `poetry add package-name`
 - 开发依赖使用 `poetry add --group dev package-name`
+- **禁止使用 pip 直接安装依赖**
+- **禁止直接使用 python 命令，必须通过 poetry run**
+
+#### ✅ 正确的命令示例
+```bash
+# 运行程序
+poetry run python -m doc_helper.site_to_pdf --help
+poetry run python doc_helper/site_to_pdf.py --help
+
+# 安装依赖
+poetry add playwright
+poetry add --group dev pytest
+
+# 运行测试和检查
+poetry run pytest
+poetry run ruff check .
+poetry run mypy .
+```
+
+#### ❌ 错误的命令示例（禁止使用）
+```bash
+# 禁止直接使用 python
+python -m doc_helper.site_to_pdf --help
+python doc_helper/site_to_pdf.py --help
+
+# 禁止使用 pip
+pip install playwright
+pip install -r requirements.txt
+```
 
 ### 代码风格
 - 使用 Ruff 进行代码格式化和检查
@@ -42,13 +71,22 @@ docs/                    # 项目文档
 ```
 
 ### 命令执行规范
-- 运行主程序: `poetry run site-to-pdf` 或 `poetry run python src/doc_helper/site_to_pdf.py`
+- **所有Python相关命令必须使用 `poetry run` 前缀**
+- 运行主程序: `poetry run python -m doc_helper.site_to_pdf` 或 `poetry run python doc_helper/site_to_pdf.py`
 - 代码格式化: `poetry run ruff format src/`
 - 代码检查: `poetry run ruff check src/ --fix`
 - 类型检查: `poetry run mypy src/`
 - 运行测试: `poetry run pytest`
+- **绝对不要建议使用裸的 `python` 命令**
 
 ## 代码生成指导
+
+### Poetry 使用强制规范
+- **任何涉及Python执行的建议都必须使用 `poetry run` 前缀**
+- **不得建议用户使用 `pip` 安装任何依赖**
+- **不得建议用户直接使用 `python` 命令**
+- **依赖管理相关操作必须通过 Poetry 完成**
+- **AI助手在提供代码执行示例时，必须遵循 Poetry 规范**
 
 ### 函数设计原则
 - 保持函数复杂度在 10 以下

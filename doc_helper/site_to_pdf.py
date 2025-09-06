@@ -120,7 +120,25 @@ class TrueParallelProcessor:
             _setup_request_blocking(page_state.page, url_blacklist_patterns)
             _setup_slow_request_monitoring(page_state.page, timeout_config)
 
-            # 根据加载策略直接等待元素，不重新加载页面
+            # 检查是否是base_url且处于入口模式
+            is_base_url = normalize_url(page_state.url, "") == normalize_url(args.base_url, args.base_url) if hasattr(args, 'base_url') else False
+            current_entry_only = args.base_url_entry_only and is_base_url
+            
+            if current_entry_only:
+                # 入口页面模式：只需要等待基本加载完成
+                logger.info(f"槽位[{slot_index}] 入口页面模式: 跳过content-selector检查")
+                try:
+                    page_state.page.wait_for_load_state("load", timeout=timeout_config.base_timeout * 1000)
+                except PlaywrightTimeoutError:
+                    logger.warning(f"槽位[{slot_index}] 入口页面加载超时，但继续处理")
+                
+                page_state.is_loading = False
+                page_state.is_loaded = True
+                page_state.final_url = page_state.page.url
+                logger.info(f"✅ 槽位[{slot_index}] 入口页面加载完成: {page_state.url}")
+                return True
+            
+            # 正常模式：根据加载策略直接等待元素，不重新加载页面
             success = self._apply_parallel_load_strategy(
                 page_state.page,
                 args.content_selector,
@@ -185,6 +203,23 @@ class TrueParallelProcessor:
         try:
             logger.info(f"📄 槽位[{slot_index}] 开始内容处理: {page_state.url}")
 
+            # 滚动到底部（如果需要）
+            if args.scroll_to_bottom:
+                try:
+                    logger.info(f"槽位[{slot_index}] 滚动页面到底部")
+                    page_state.page.evaluate("""
+                        () => {
+                            window.scrollTo({
+                                top: document.body.scrollHeight,
+                                behavior: 'smooth'
+                            });
+                        }
+                    """)
+                    time.sleep(2)  # 等待异步内容加载
+                    logger.info(f"槽位[{slot_index}] 滚动完成")
+                except Exception as e:
+                    logger.warning(f"槽位[{slot_index}] 滚动到底部失败: {e}")
+
             # 提取页面链接
             links = _extract_page_links(
                 page_state.page,
@@ -192,6 +227,15 @@ class TrueParallelProcessor:
                 page_state.final_url or page_state.url,
                 base_url_normalized,
             )
+
+            # 检查是否是base_url且处于入口模式
+            is_base_url = normalize_url(page_state.url, base_url_normalized) == normalize_url(base_url_normalized, base_url_normalized)
+            current_entry_only = args.base_url_entry_only and is_base_url
+            
+            # 如果是入口页面模式，只提取链接，不生成PDF
+            if current_entry_only:
+                logger.info(f"槽位[{slot_index}] 入口页面模式: 只提取链接，不生成PDF: {page_state.url}")
+                return None, links
 
             # 检查是否已有PDF文件
             existing_pdf = _check_existing_pdf(progress_state.temp_dir, page_state.url)
@@ -946,6 +990,7 @@ def _handle_load_retry(attempt, max_retries, timeout_config, error):
 
 def _handle_page_loading_with_retries(
     page, url, content_selector, timeout_config, max_retries, verbose_mode, load_strategy, url_blacklist_patterns=None,
+    entry_only=False, scroll_to_bottom=False,
 ):
     """处理页面加载和重试逻辑"""
     # 设置请求拦截
@@ -966,6 +1011,8 @@ def _handle_page_loading_with_retries(
                 slow_requests,
                 attempt,
                 max_retries,
+                entry_only,
+                scroll_to_bottom,
             )
 
             if result:
@@ -1274,6 +1321,7 @@ def _check_existing_pdf(temp_dir, url):
 
 def _handle_page_loading(
     page, url, content_selector, timeout_config, max_retries, verbose_mode, load_strategy, url_blacklist_patterns,
+    entry_only=False, scroll_to_bottom=False,
 ):
     """处理页面加载逻辑"""
     try:
@@ -1286,6 +1334,8 @@ def _handle_page_loading(
             verbose_mode,
             load_strategy,
             url_blacklist_patterns,
+            entry_only,
+            scroll_to_bottom,
         )
     except Exception as e:
         raise Exception(f"页面加载失败: {e!s}")
@@ -1324,6 +1374,8 @@ def process_page_with_failure_tracking(
     load_strategy="normal",
     url_blacklist_patterns=None,
     temp_dir=None,
+    entry_only=False,
+    scroll_to_bottom=False,
 ):
     """处理单个页面并生成PDF，同时提取该页面内的链接，包含失败跟踪"""
     # 检查是否已经处理过这个URL（根据PDF文件是否存在）
@@ -1340,6 +1392,13 @@ def process_page_with_failure_tracking(
     try:
         logger.info(f"准备处理页面: {url}")
 
+        # 检查是否是base_url且处于入口模式
+        is_base_url = normalize_url(url, base_url) == normalize_url(base_url, base_url)
+        current_entry_only = entry_only and is_base_url
+        
+        if current_entry_only:
+            logger.info(f"检测到base-url入口页面模式: {url}")
+
         # 处理页面加载和重试逻辑
         try:
             final_url = _handle_page_loading(
@@ -1351,6 +1410,8 @@ def process_page_with_failure_tracking(
                 verbose_mode,
                 load_strategy,
                 url_blacklist_patterns,
+                current_entry_only,
+                scroll_to_bottom,
             )
         except Exception as e:
             failure_reason = str(e)
@@ -1360,8 +1421,32 @@ def process_page_with_failure_tracking(
         if final_url != url:
             logger.info(f"重定向: {url} -> {final_url}")
 
+        # 添加滚动到底部的功能
+        if scroll_to_bottom:
+            try:
+                logger.info(f"滚动页面到底部: {url}")
+                page.evaluate("""
+                    () => {
+                        // 平滑滚动到页面底部
+                        window.scrollTo({
+                            top: document.body.scrollHeight,
+                            behavior: 'smooth'
+                        });
+                    }
+                """)
+                # 等待一段时间让异步内容加载
+                time.sleep(2)
+                logger.info("滚动完成，等待异步内容加载")
+            except Exception as e:
+                logger.warning(f"滚动到底部失败: {e}")
+
         # 提取页面链接
         links = _extract_page_links(page, toc_selectors, final_url, base_url)
+
+        # 如果是入口页面模式，只提取链接，不生成PDF
+        if entry_only:
+            logger.info(f"入口页面模式: 只提取链接，不生成PDF: {url}")
+            return None, links, final_url, None
 
         # 如果PDF已存在，直接返回
         if existing_pdf:
@@ -1405,6 +1490,8 @@ def process_page(
     load_strategy="normal",
     url_blacklist_patterns=None,
     temp_dir=None,
+    entry_only=False,
+    scroll_to_bottom=False,
 ):
     """处理单个页面并生成PDF，同时提取该页面内的链接"""
     pdf_path, links, final_url, _ = process_page_with_failure_tracking(
@@ -1421,6 +1508,8 @@ def process_page(
         load_strategy,
         url_blacklist_patterns,
         temp_dir,
+        entry_only,
+        scroll_to_bottom,
     )
     return pdf_path, links, final_url
 
@@ -1657,6 +1746,10 @@ def _crawl_pages_serial(
                 continue
 
             try:
+                # 检查是否是base_url且处于入口模式
+                is_base_url = normalize_url(url, base_url_normalized) == normalize_url(base_url_normalized, base_url_normalized)
+                current_entry_only = args.base_url_entry_only and is_base_url
+                
                 pdf_path, links, final_url, failure_reason = process_page_with_failure_tracking(
                     page,  # 传递页面
                     url,
@@ -1671,6 +1764,8 @@ def _crawl_pages_serial(
                     args.load_strategy,
                     url_blacklist_patterns,  # 传递URL黑名单模式
                     progress_state.temp_dir,  # 传递临时目录
+                    current_entry_only,  # 传递入口模式
+                    args.scroll_to_bottom,  # 传递滚动参数
                 )
 
                 _handle_page_result(
@@ -1800,6 +1895,10 @@ def _process_completed_task_with_qos(
     elif page is not None:
         # 页面加载成功，进行内容处理
         try:
+            # 检查是否是base_url且处于入口模式
+            is_base_url = normalize_url(url, base_url_normalized) == normalize_url(base_url_normalized, base_url_normalized)
+            current_entry_only = args.base_url_entry_only and is_base_url
+            
             pdf_path, links = _process_loaded_page(
                 page,
                 url,
@@ -1808,6 +1907,8 @@ def _process_completed_task_with_qos(
                 base_url_normalized,
                 timeout_config,
                 progress_state.temp_dir,
+                current_entry_only,
+                args.scroll_to_bottom,
             )
 
             _handle_page_result(
@@ -1932,6 +2033,10 @@ def _process_completed_task(
     elif page is not None:
         # 页面加载成功，进行内容处理
         try:
+            # 检查是否是base_url且处于入口模式
+            is_base_url = normalize_url(url, base_url_normalized) == normalize_url(base_url_normalized, base_url_normalized)
+            current_entry_only = args.base_url_entry_only and is_base_url
+            
             pdf_path, links = _process_loaded_page(
                 page,
                 url,
@@ -1940,6 +2045,8 @@ def _process_completed_task(
                 base_url_normalized,
                 timeout_config,
                 progress_state.temp_dir,
+                current_entry_only,
+                args.scroll_to_bottom,
             )
 
             _handle_page_result(
@@ -2145,10 +2252,34 @@ def _crawl_pages_parallel(
     return progress_state
 
 
-def _process_loaded_page(page, original_url, final_url, args, base_url_normalized, timeout_config, temp_dir):
+def _process_loaded_page(page, original_url, final_url, args, base_url_normalized, timeout_config, temp_dir, 
+                        entry_only=False, scroll_to_bottom=False):
     """处理已加载的页面，生成PDF并提取链接"""
+    
+    # 滚动到底部（如果需要）
+    if scroll_to_bottom:
+        try:
+            logger.info(f"滚动页面到底部: {original_url}")
+            page.evaluate("""
+                () => {
+                    window.scrollTo({
+                        top: document.body.scrollHeight,
+                        behavior: 'smooth'
+                    });
+                }
+            """)
+            time.sleep(2)  # 等待异步内容加载
+            logger.info("滚动完成，等待异步内容加载")
+        except Exception as e:
+            logger.warning(f"滚动到底部失败: {e}")
+    
     # 提取页面链接
     links = _extract_page_links(page, args.toc_selector, final_url, base_url_normalized)
+    
+    # 如果是入口页面模式，只提取链接，不生成PDF
+    if entry_only:
+        logger.info(f"入口页面模式: 只提取链接，不生成PDF: {original_url}")
+        return None, links
 
     # 检查是否已有PDF文件
     if temp_dir:
@@ -2290,6 +2421,10 @@ def _retry_single_url(retry_page, url, args, base_url_normalized, timeout_config
     """重试单个URL"""
     for attempt in range(retry_count):
         try:
+            # 检查是否是base_url且处于入口模式
+            is_base_url = normalize_url(url, base_url_normalized) == normalize_url(base_url_normalized, base_url_normalized)
+            current_entry_only = args.base_url_entry_only and is_base_url
+            
             pdf_path, _, final_url, failure_reason = process_page_with_failure_tracking(
                 retry_page,
                 url,
@@ -2303,7 +2438,9 @@ def _retry_single_url(retry_page, url, args, base_url_normalized, timeout_config
                 args.verbose,
                 args.load_strategy,
                 url_blacklist_patterns,
-                temp_dir,  # 添加temp_dir参数
+                temp_dir,
+                current_entry_only,
+                args.scroll_to_bottom,
             )
 
             if pdf_path and pdf_path.exists():
@@ -2638,6 +2775,18 @@ def _create_argument_parser():
         help="QoS等待时间（秒），当检测到多个并行任务都失败时，等待指定时间以避免触发网站流控，默认600秒（10分钟）",
     )
 
+    # 入口页面和滚动参数
+    parser.add_argument(
+        "--base-url-entry-only", 
+        action="store_true", 
+        help="将base-url仅作为入口页面，不要求匹配content-selector，只需要toc-selector能提取到链接即可"
+    )
+    parser.add_argument(
+        "--scroll-to-bottom", 
+        action="store_true", 
+        help="访问每个页面时都将滚动条拉到最底下，适配异步加载的情况"
+    )
+
     # 缓存管理参数
     parser.add_argument("--restart", action="store_true", help="重新开始爬取，删除之前的缓存和进度文件")
     parser.add_argument("--cleanup", action="store_true", help="清理指定URL和输出文件对应的临时文件和进度文件")
@@ -2694,6 +2843,12 @@ def _initialize_configuration(args):
         default_pattern = get_parent_path_pattern(base_url_normalized)
         url_pattern = re.compile(default_pattern)
         logger.info(f"使用默认URL匹配模式（基于父目录）: {url_pattern.pattern}")
+
+    # 记录新功能的配置
+    if args.base_url_entry_only:
+        logger.info("启用base-url入口页面模式: base-url将仅作为入口页面，不要求匹配content-selector")
+    if args.scroll_to_bottom:
+        logger.info("启用滚动到底部功能: 访问每个页面时都将滚动到底部以适配异步加载")
 
     return timeout_config, base_url_normalized, url_blacklist_patterns, url_pattern, domain_failure_tracker
 
