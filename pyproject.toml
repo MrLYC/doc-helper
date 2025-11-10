@@ -78,7 +78,7 @@ pytest = "^8.4.2"
 pytest-cov = "^7.0.0"
 tox = "^4.30.3"
 tox-gh-actions = "^3.5.0"
-black = "^25.9.0"
+black = "^25.11.0"
 pytest-asyncio = "^1.2.0"
 
 
