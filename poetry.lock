@@ -588,14 +588,14 @@ reference = "tencent"
 
 [[package]]
 name = "fastapi"
-version = "0.123.0"
+version = "0.123.4"
 description = "FastAPI framework, high performance, easy to learn, fast to code, ready for production"
 optional = false
 python-versions = ">=3.8"
 groups = ["main"]
 files = [
-    {file = "fastapi-0.123.0-py3-none-any.whl", hash = "sha256:cb56e69e874afa897bd3416c8a3dbfdae1730d0a308d4c63303f3f4b44136ae4"},
-    {file = "fastapi-0.123.0.tar.gz", hash = "sha256:1410678b3c44418245eec85088b15140d894074b86e66061017e2b492c09b138"},
+    {file = "fastapi-0.123.4-py3-none-any.whl", hash = "sha256:fc2b5cbc10fa05f4f22d87ef7ebc8993b5110ffd9850c08e1fc35a0da37f492e"},
+    {file = "fastapi-0.123.4.tar.gz", hash = "sha256:c2d0ac82f3534c8e35692fda67e2412ac60bad846bb903a65cd8145a65741474"},
 ]
 
 [package.dependencies]
@@ -2582,4 +2582,4 @@ reference = "tencent"
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.9.0"
-content-hash = "dffb959f20ee56570d133df81b867c20e35e5b355919c009b3a7289610fba019"
+content-hash = "875228e156db05acaf941a88d1390190ce528bb79ffb2c522db4e5f4ef6ec126"
