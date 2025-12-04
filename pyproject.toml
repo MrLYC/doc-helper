@@ -65,7 +65,7 @@ playwright = "^1.56.0"
 pypdf2 = "^3.0.1"
 prometheus-client = "^0.23.1"
 aiohttp = "^3.13.2"
-fastapi = "^0.123.5"
+fastapi = "^0.123.8"
 uvicorn = {extras = ["standard"], version = "^0.38.0"}
 
 [tool.poetry.group.dev]
