@@ -66,7 +66,7 @@ pypdf2 = "^3.0.1"
 prometheus-client = "^0.23.1"
 aiohttp = "^3.13.2"
 fastapi = "^0.124.4"
-uvicorn = {extras = ["standard"], version = "^0.38.0"}
+uvicorn = {extras = ["standard"], version = "^0.39.0"}
 
 [tool.poetry.group.dev]
 optional = true
