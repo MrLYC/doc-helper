@@ -63,7 +63,7 @@ classifiers = [
 python = "^3.9.0"
 playwright = "^1.57.0"
 pypdf2 = "^3.0.1"
-prometheus-client = "^0.23.1"
+prometheus-client = "^0.24.0"
 aiohttp = "^3.13.3"
 fastapi = "^0.128.0"
 uvicorn = {extras = ["standard"], version = "^0.39.0"}
